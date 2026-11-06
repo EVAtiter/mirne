@@ -28,6 +28,12 @@ enum ViewerWindowTiming {
     /// 起動したとき、窓が画面に出るのを待つ間隔と回数（合わせて 2 秒まで）
     static let restoreWaitInterval: Duration = .milliseconds(50)
     static let restoreWaitAttempts = 40
+    /// 復元するまで窓を透明にしておくが、復元できなかったときはこの時間で見せる
+    /// （復元を待つ 2 秒より長く。映像の部分の大きさが届かないと、復元が始まらないため）
+    static let revealFallback: Duration = .seconds(3)
+    /// 窓が別の画面へ移ってからこの時間の内に、マウスで操作していないのに大きさが変わろうとしたら、macOS の当て直しとみなして止める。
+    /// 実測では、画面が替わってから 0.6〜1.1 秒後に、その画面で前に使った大きさ（無ければ既定の大きさ）が当てられた
+    static let screenChangeResizeGuard: Duration = .seconds(3)
 }
 
 /// 画面外の救済の決まり（参照実装：EVA Clock Nixie の WindowPositioning）
@@ -101,8 +107,9 @@ extension NSScreen {
 /// - 画面の構成の変化・スリープからの復帰では、最後の通知から 1.5 秒たってから 1 回だけ置き直す
 /// - 画面外の救済は「十分見えているか」で判定する
 ///
-/// SwiftUI が付けている自動保存（"NSWindow Frame viewer"）は止める。初めて起動したとき（保存が無いとき）は、
-/// 自動保存で開いた位置をそのまま引き継ぐ
+/// SwiftUI が付けている自動保存（"NSWindow Frame viewer"）は止め、残っている記録も消す。初めて起動したとき（保存が無いとき）は、
+/// 自動保存で開いた位置をそのまま引き継ぐ。
+/// 窓は復元するまで透明にしておく（SwiftUI が自動保存や既定の位置に一度出してから、保存した位置へ動かすことになるため）
 @MainActor
 @Observable
 final class ViewerWindowController: NSObject {
@@ -134,6 +141,8 @@ final class ViewerWindowController: NSObject {
     @ObservationIgnored private var followingSidebar = false
     @ObservationIgnored private var restored = false
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
+    /// 復元できなかったときに窓を見せる見張り
+    @ObservationIgnored private var revealTask: Task<Void, Never>?
     /// 窓を閉じたか（開き直したら知らせる）
     @ObservationIgnored private var closed = false
     /// 窓を閉じた・開き直した（視聴を止めて番組表を巡回する・視聴に戻る）
@@ -145,6 +154,8 @@ final class ViewerWindowController: NSObject {
     @ObservationIgnored private var reconfiguring = false
     @ObservationIgnored private var fullScreenTransition = false
     @ObservationIgnored private var repositionTask: Task<Void, Never>?
+    /// 窓が別の画面へ移った時刻（macOS が大きさを当て直すのを見分ける）
+    @ObservationIgnored private var screenChangedAt: ContinuousClock.Instant?
     @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "window")
 
@@ -166,6 +177,9 @@ final class ViewerWindowController: NSObject {
             restoreTask = nil
             sidebarObservation = nil
         }
+        if !restored { hideUntilRestored(window) }
+        // 開き直した窓は映像の部分の大きさが前と同じだと知らせが来ないので、ここから復元を始める
+        if reopened, videoSize.width > 0 { scheduleRestore(window) }
         applyLevel()
         if reopened { onReopen?() }
     }
@@ -238,8 +252,18 @@ final class ViewerWindowController: NSObject {
         // SwiftUI の自動保存を止める（保存の時機を選べず、画面の構成が変わっている間の位置も書くため）。
         // 窓に付けたときに止めると、SwiftUI が自動保存の位置を当てる前なので、前の版からの位置を引き継げない
         // （最初の確かめで、大きさだけ引き継いで外部画面の中央に出た）
+        let autosaveName = window.frameAutosaveName
         window.setFrameAutosaveName("")
-        guard let chrome else { return }
+        // 止めても記録は残り、窓が記録の画面へ入ったときに SwiftUI がその大きさを当て直す
+        // （外部画面で起動して内蔵画面へ移すと、記録の 1739×1158 が当たり、16:9 に合わせた幅が保存された）。
+        // 初めての起動の位置の引き継ぎは、ここまでに SwiftUI が当て終えている
+        if !autosaveName.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "NSWindow Frame \(autosaveName)")
+        }
+        guard let chrome else {
+            reveal(window)
+            return
+        }
         let frame: NSRect
         if let placement = AppSettings.viewerWindowPlacement {
             let width = max(placement.videoWidth, ViewerWindowLayout.minimumVideoWidth)
@@ -262,10 +286,31 @@ final class ViewerWindowController: NSObject {
         setFrame(frame, on: window)
         // 次のランループで macOS に書き換えられていたら当て直す（swiftui-appkit-pitfalls #31）
         Task { [weak self, weak window] in
-            guard let self, let window, window.frame != frame, !self.isFullScreen else { return }
-            self.logger.info("復元した位置がずれたので当て直した")
-            self.setFrame(frame, on: window)
+            guard let self, let window else { return }
+            if window.frame != frame, !self.isFullScreen {
+                self.logger.info("復元した位置がずれたので当て直した")
+                self.setFrame(frame, on: window)
+            }
+            self.reveal(window)
         }
+    }
+
+    /// 復元するまで窓を透明にする。復元できなかったときに備えて、時間がたったら見せる
+    private func hideUntilRestored(_ window: NSWindow) {
+        window.alphaValue = 0
+        revealTask?.cancel()
+        revealTask = Task { [weak self, weak window] in
+            try? await Task.sleep(for: ViewerWindowTiming.revealFallback)
+            guard !Task.isCancelled, let self, let window, window.alphaValue == 0 else { return }
+            self.logger.info("復元できないまま時間がたったので窓を見せた")
+            self.reveal(window)
+        }
+    }
+
+    private func reveal(_ window: NSWindow) {
+        revealTask?.cancel()
+        revealTask = nil
+        window.alphaValue = 1
     }
 
     /// 位置と大きさを保存する。`userInitiated` でなければ保存先の画面に触らず、保存先と違う画面にいるときは位置も捨てる
@@ -339,6 +384,12 @@ final class ViewerWindowController: NSObject {
     fileprivate func constrainedSize(for window: NSWindow, proposed: NSSize) -> NSSize {
         guard !isFullScreen, !fullScreenTransition, let chrome else { return proposed }
         let current = window.frame.size
+        if isResizeAfterScreenChange() {
+            // 画面をまたいで離した後、macOS がその画面で前に使った大きさを当て直す（リサイズの始めと終わりの知らせも付く）。
+            // 人の操作ではないので、保っている映像の幅のままにする
+            logger.info("画面が替わった後の大きさの当て直しを止めた: 提案 \(proposed.width, privacy: .public)×\(proposed.height, privacy: .public)")
+            return Self.frameSize(videoWidth: keptVideoWidth ?? (current.width - chrome.width), chrome: chrome)
+        }
         if resizeAxis == nil || !window.inLiveResize {
             if abs(proposed.width - current.width) >= 1 {
                 resizeAxis = .width
@@ -352,6 +403,12 @@ final class ViewerWindowController: NSObject {
             ? (proposed.height - chrome.height) * ViewerWindowLayout.videoAspectRatio
             : proposed.width - chrome.width
         return Self.frameSize(videoWidth: max(width, ViewerWindowLayout.minimumVideoWidth), chrome: chrome)
+    }
+
+    /// 別の画面へ移った直後で、マウスのボタンを押していない（人が辺や角をつかんでいない）大きさの変更か
+    private func isResizeAfterScreenChange() -> Bool {
+        guard let changed = screenChangedAt, NSEvent.pressedMouseButtons & 1 == 0 else { return false }
+        return ContinuousClock.now - changed < ViewerWindowTiming.screenChangeResizeGuard
     }
 
     /// SwiftUI の NavigationSplitView の中の AppKit のサイドバーを見つけて、開閉を見張る。
@@ -453,6 +510,9 @@ final class ViewerWindowController: NSObject {
         observers = [
             center.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.windowDidMove() }
+            },
+            center.addObserver(forName: NSWindow.didChangeScreenNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.screenChangedAt = .now }
             },
             center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.windowWillClose() }
