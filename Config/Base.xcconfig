@@ -1,0 +1,13 @@
+// mirne の署名設定の既定値。
+//
+// 公開リポジトリに個人の署名チーム・証明書名を残さないため、ここでは
+// 誰の環境でもビルドできるアドホック署名を既定にし、手元の Local.xcconfig
+// （.gitignore 対象。雛形は Local.xcconfig.example）で上書きする。
+// project.yml の settings に署名の項目を書くとこちらより優先されてしまうので書かない。
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+// 無ければ読み飛ばす（#include? は存在しなくてもエラーにならない）
+#include? "Local.xcconfig"

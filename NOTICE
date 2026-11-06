@@ -1,0 +1,20 @@
+mirne
+Copyright 2026 EVA Titer
+
+This product includes software derived from coax
+(https://github.com/Till0196/coax), Copyright 2026 Till0196,
+licensed under the Apache License, Version 2.0.
+
+  - Sources/SI/ARIBString.swift   (from pkg/isdb/decode.go, charset.go, control.go)
+  - Sources/SI/ARIBTables.swift   (from pkg/isdb/tables.go)
+  - Sources/SI/CaptionPieces.swift   (from pkg/isdb/pieces.go)
+  - Sources/SI/Caption.swift   (from pkg/isdb/caption/caption.go)
+  - Tests/mirneTests/CaptionTests.swift   (from pkg/isdb/caption/caption_test.go, pkg/isdb/pieces_test.go)
+
+coax itself is not included in this repository. scripts/fetch-coax.sh
+downloads and builds it; coaxd is licensed under GPL-2.0-only and coax
+under Apache-2.0 (see the coax repository for details).
+
+tools/mirne-si (a development tool, not part of the app) imports the coax
+packages pkg/isdb and pkg/mpegts from the source that scripts/fetch-coax.sh
+downloads; no coax code is copied into it.

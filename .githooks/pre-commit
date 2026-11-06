@@ -1,0 +1,4 @@
+#!/bin/bash
+# コミットしようとしている内容に、公開してはいけない情報が入っていないかを調べる。
+# 有効にするには: git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/scripts/check-leaks.sh" --staged

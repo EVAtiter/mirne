@@ -1,0 +1,31 @@
+# ── ビルド成果物（xcodegen で再生成できるものを含む） ──
+build/
+*.xcodeproj/
+*.app
+*.zip
+*.dSYM/
+*.xcarchive/
+
+# ── 個人の開発環境（公開しない） ──
+# 署名チーム・証明書名は Config/Local.xcconfig に置く（雛形は Local.xcconfig.example）
+Config/Local.xcconfig
+# 漏れ検査で探す個人情報のパターン（雛形は .leakcheck.example）
+.leakcheck.local
+CLAUDE.md
+.claude/
+.vscode/
+.idea/
+*.xcuserstate
+xcuserdata/
+docs/private/
+
+# ── 放送の素材（著作物であり、居住地域も分かる） ──
+fixtures/private/
+*.ts
+*.m2ts
+*.tlv
+scan*.json
+channels*.yml
+
+# ── macOS ──
+.DS_Store

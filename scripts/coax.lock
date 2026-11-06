@@ -1,0 +1,4 @@
+# mirne に同梱する coax の取得元と版。
+# 更新するときは、新しいコミットで coaxd との接続・選局・スキャンを確かめてから書き換える。
+COAX_REPOSITORY=https://github.com/Till0196/coax.git
+COAX_COMMIT=b4c9090418ca34f84accb8cf8324f2e47121ea9f

@@ -1,0 +1,10 @@
+// 手元の署名設定の雛形。
+// Local.xcconfig という名前で複製し、自分のチームと証明書に書き換える。
+// Local.xcconfig は .gitignore 対象なので、コミットされない。
+
+DEVELOPMENT_TEAM = XXXXXXXXXX
+CODE_SIGN_IDENTITY = Developer ID Application: Your Name (XXXXXXXXXX)
+
+// 公証（scripts/notarize.sh）に使う notarytool のキーチェーンのプロファイル名。
+// xcrun notarytool store-credentials で登録したもの。ビルドの設定としては使わない
+NOTARY_KEYCHAIN_PROFILE = your-notary-profile

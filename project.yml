@@ -1,0 +1,143 @@
+name: mirne
+
+# 署名チームと証明書名はここに書かない。
+# Config/Base.xcconfig が既定（アドホック署名）を決め、手元の Config/Local.xcconfig で上書きする。
+
+options:
+  bundleIdPrefix: com.slack-kingdom
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "27"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    # arm64 専用ビルド（共通ルールの方針）
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+  configs:
+    # xcodegen は #if DEBUG 用の DEBUG を自動定義しないので明示する
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    # build アクションの Release でもシンボルを削る（archive は既定で削る）。
+    # 削らないと、デバッグ用のシンボル情報に手元のパス（ユーザー名を含む）が残る
+    # （2026-11-03 実測：mirne 本体に 15 箇所）
+    Release:
+      DEPLOYMENT_POSTPROCESSING: YES
+
+targets:
+  mirne:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/mirne
+        excludes:
+          - "**/.DS_Store"
+          # Info.plist は INFOPLIST_FILE で参照するのでリソースコピーから外す
+          - "Info.plist"
+      - path: Sources/CoaxKit
+      - path: Sources/TSPipeline
+      - path: Sources/Player
+      - path: Sources/SI
+      - path: Sources/Session
+      - path: Sources/Channels
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
+    postBuildScripts:
+      # coaxd・coax を Contents/Helpers に入れて署名する。
+      # アプリ本体の署名はすべてのビルドフェーズの後に行われるので、入れ子のコードはここで先に署名しておく
+      - name: Embed coax helpers
+        script: scripts/embed-coax-helpers.sh
+        inputFiles:
+          - $(SRCROOT)/build/coax/coaxd
+          - $(SRCROOT)/build/coax/coax
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/coaxd
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/coax
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_NAME: mirne
+        PRODUCT_BUNDLE_IDENTIFIER: com.slack-kingdom.mirne
+        INFOPLIST_FILE: Sources/mirne/Info.plist
+        # 外部フィルタの起動と IOKit の直接 USB（coaxd）のため App Sandbox は使わない
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+        # アプリのアイコン（Sources/mirne/Assets.xcassets。scripts/make-icon.sh で作る）。
+        # macOS 27 は icns だけだと 16/32px が灰色の箱に入るので Asset Catalog にする
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SKIP_INSTALL: NO
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "7"
+
+  # 計測用のコマンド。配布物には含めない
+  mirne-probe:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/mirne-probe
+      - path: Sources/CoaxKit
+      - path: Sources/TSPipeline
+      - path: Sources/Player
+      - path: Sources/SI
+      - path: Sources/Session
+      - path: Sources/Channels
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: mirne-probe
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
+
+  # 単体試験。アプリには載せず、試験するソースを直接取り込む
+  mirneTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/mirneTests
+        excludes:
+          - "Info.plist"
+      - path: Sources/CoaxKit
+      - path: Sources/TSPipeline
+      - path: Sources/Player
+      - path: Sources/SI
+      - path: Sources/Session
+      - path: Sources/Channels
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: mirneTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.slack-kingdom.mirneTests
+        INFOPLIST_FILE: Tests/mirneTests/Info.plist
+
+schemes:
+  mirne:
+    build:
+      targets:
+        mirne: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - mirneTests
+    archive:
+      config: Release
+  mirne-probe:
+    build:
+      targets:
+        mirne-probe: all
+    run:
+      config: Debug
