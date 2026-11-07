@@ -43,7 +43,7 @@ video, audio, captions and program guide
 - **Window**: resizes while keeping 16:9. Full screen and Always on Top. Remembers its position and size (and which display) and whether the sidebar is shown, and restores them the next time it opens
 - **Captions**: drawn over the video with the colors, positions and sizes the broadcast specifies
 - **Audio**: choose among dual mono (main, sub, main + sub) and multiple audio streams (secondary audio, audio description and so on). Stereo and 5.1ch
-- **Program guide**: stations across, time down. Clicking a program tunes to its station. Opens in its own window or over the viewer window
+- **Program guide**: stations across, time down. Clicking a program tunes to its station, and hovering over it shows the program details in a popover. The time column stays on the left when you scroll sideways. Opens in its own window or over the viewer window
 - **Guide collection**: while the viewer window is closed, and while the program guide is shown over it, mirne tunes to each station in turn to collect the program guide
 - **At launch**: tunes to the station you were watching last time (can be turned off in the settings)
 - **Channel editing**: hide, reorder and rename stations
