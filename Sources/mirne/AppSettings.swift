@@ -23,6 +23,8 @@ enum AppSettings {
         static let channelEdits = "channelEdits"
         /// 視聴ウィンドウの位置と大きさ（ViewerWindowPlacement の JSON）
         static let viewerWindowPlacement = "viewerWindowPlacement"
+        /// 視聴ウィンドウのサイドバー（チャンネル一覧）を出しているか
+        static let viewerSidebarVisible = "viewerSidebarVisible"
     }
 
     /// 外部フィルタの設定。未設定ならフィルタを使わない
@@ -96,6 +98,12 @@ enum AppSettings {
                 .flatMap { try? JSONDecoder().decode(ViewerWindowPlacement.self, from: $0) }
         }
         set { UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: Key.viewerWindowPlacement) }
+    }
+
+    /// 視聴ウィンドウのサイドバー（チャンネル一覧）を出しているか。次に起動しても続く。未設定なら出す
+    static var viewerSidebarVisible: Bool {
+        get { UserDefaults.standard.object(forKey: Key.viewerSidebarVisible) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Key.viewerSidebarVisible) }
     }
 
     /// 音量の記憶。未設定なら nil

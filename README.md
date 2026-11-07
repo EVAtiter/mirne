@@ -40,7 +40,7 @@ video, audio, captions and program guide
 ## Features
 
 - **Watching**: choose a station found by the channel scan from the sidebar, the number keys or ↑/↓. Switching to a subchannel on the same physical channel happens without retuning
-- **Window**: resizes while keeping 16:9. Full screen and Always on Top. Remembers its position and size (and which display) and restores them the next time it opens
+- **Window**: resizes while keeping 16:9. Full screen and Always on Top. Remembers its position and size (and which display) and whether the sidebar is shown, and restores them the next time it opens
 - **Captions**: drawn over the video with the colors, positions and sizes the broadcast specifies
 - **Audio**: choose among dual mono (main, sub, main + sub) and multiple audio streams (secondary audio, audio description and so on). Stereo and 5.1ch
 - **Program guide**: stations across, time down. Clicking a program tunes to its station. Opens in its own window or over the viewer window

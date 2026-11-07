@@ -4,7 +4,8 @@ import SwiftUI
 /// 視聴ウィンドウ。サイドバーにチャンネル一覧、右に映像とオーバーレイ。
 struct ViewerView: View {
     @Bindable var model: ViewerModel
-    @State private var sidebar = NavigationSplitViewVisibility.all
+    /// サイドバーの開閉。前回の状態で始める（全画面の間の開閉も記録する）
+    @State private var sidebar: NavigationSplitViewVisibility = AppSettings.viewerSidebarVisible ? .all : .detailOnly
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -33,6 +34,9 @@ struct ViewerView: View {
                         .disabled(model.isScanning)
                     }
                 }
+        }
+        .onChange(of: sidebar) { _, visibility in
+            AppSettings.viewerSidebarVisible = visibility != .detailOnly
         }
         .navigationTitle(model.current.map { $0.service.name } ?? "mirne")
         .sheet(isPresented: .constant(model.isScanning)) {

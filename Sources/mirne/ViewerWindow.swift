@@ -75,16 +75,27 @@ enum ViewerWindowPositioning {
     }
 }
 
-/// 保存する視聴ウィンドウの位置と大きさ。
+/// 保存する視聴ウィンドウの位置と大きさ。**サイドバーを含めない**（サイドバーの開閉で記録が変わらないように）。
 ///
-/// 位置は画面の UUID と、その画面の `frame` の左下からの「窓の左上」の位置。
-/// 左上で持つのは、窓の高さが映像の幅とサイドバー・ツールバーから決まるので、左上を保つほうが見た目の位置が変わらないため。
+/// 位置は画面の UUID と、その画面の `frame` の左下からの「映像の部分の左端」と「窓の上端」。
+/// 横はサイドバーを除いた映像の左端で持ち、復元するときに今のサイドバーの幅を足して窓の左端を出す。
+/// 縦は窓の上端で持つ（サイドバーは縦の位置に関係しない。窓の高さは映像の幅とツールバーから決まるので、上端を保つほうが見た目の位置が変わらない）。
 /// 大きさは映像の部分の幅（高さは 16:9 から決まる。サイドバーの幅は起動のたびに測る）
 struct ViewerWindowPlacement: Codable, Equatable {
     var displayUUID: String?
-    var left: Double
+    /// 映像の部分の左端
+    var videoLeft: Double?
+    /// 1.0.1 までの記録：窓の左端（サイドバーを含む）。新しく書くときは nil（JSON に出さない）
+    var left: Double?
     var top: Double
     var videoWidth: Double
+
+    /// 窓の左端。映像は窓の右端に寄っているので、映像の右端（左端＋幅）から窓の幅を引く。
+    /// 1.0.1 までの記録は窓の左端なので、そのまま使う（その版はサイドバーを出した状態で起動していた）
+    func windowLeft(videoWidth width: Double, frameWidth: Double) -> Double {
+        if let videoLeft { return videoLeft + width - frameWidth }
+        return left ?? 0
+    }
 }
 
 extension NSScreen {
@@ -177,7 +188,11 @@ final class ViewerWindowController: NSObject {
             restoreTask = nil
             sidebarObservation = nil
         }
-        if !restored { hideUntilRestored(window) }
+        if !restored {
+            hideUntilRestored(window)
+            // 窓が並ぶ前に当てられれば、開閉のアニメーションの途中を測らずに済む（まだ分割ビューが無ければ復元の直前に当てる）
+            applySavedSidebar(in: window)
+        }
         // 開き直した窓は映像の部分の大きさが前と同じだと知らせが来ないので、ここから復元を始める
         if reopened, videoSize.width > 0 { scheduleRestore(window) }
         applyLevel()
@@ -238,7 +253,8 @@ final class ViewerWindowController: NSObject {
                 guard let window, !window.isVisible else { break }
                 try? await Task.sleep(for: ViewerWindowTiming.restoreWaitInterval)
             }
-            // 画面に出た後の並べ直しを 1 回待つ
+            // 前回のサイドバーの開閉を当ててから、並べ直しを 1 回待つ（映像でない部分の幅は当てた後で測る）
+            self?.applySavedSidebar(in: window)
             try? await Task.sleep(for: ViewerWindowTiming.restoreWaitInterval)
             guard let self, let window, !self.restored, self.videoSize.width > 0 else { return }
             self.chrome = Self.chrome(of: window, video: self.videoSize)
@@ -265,12 +281,26 @@ final class ViewerWindowController: NSObject {
             return
         }
         let frame: NSRect
-        if let placement = AppSettings.viewerWindowPlacement {
+        if var placement = AppSettings.viewerWindowPlacement {
+            // 1.0.1 までの記録（窓の左端）は、先に映像の左端へ書き換える。サイドバーの開閉では窓の大きさを
+            // 自分で変えるので保存が走らず、書き換えないまま閉じた状態で起動すると、映像がサイドバーの幅だけずれる。
+            // 前の版はサイドバーを出した状態で起動していたので、記録の左端にサイドバーの幅を足す。幅は測った値を使うが、
+            // 起動の直後にサイドバーが開くアニメーションの途中だと小さく測れる（AppKit の分割ビューの自動保存が「畳んだ」と
+            // 覚えていると、いったん畳んだ状態で並べてから開く。実測で 36）ので、そのときは列の既定の幅を使う
+            if placement.videoLeft == nil {
+                let sidebarWidth = chrome.width >= ViewerWindowLayout.sidebarMinimumWidth ? chrome.width : ViewerWindowLayout.sidebarIdealWidth
+                placement.videoLeft = (placement.left ?? 0) + sidebarWidth
+                placement.left = nil
+                AppSettings.viewerWindowPlacement = placement
+                logger.info("前の版の位置の記録を映像の左端へ書き換えた")
+            }
             let width = max(placement.videoWidth, ViewerWindowLayout.minimumVideoWidth)
             let size = Self.frameSize(videoWidth: width, chrome: chrome)
             let target = placement.displayUUID.flatMap(NSScreen.screen(forUUID:))
             let base = (target ?? ViewerWindowPositioning.primaryScreen())?.frame ?? .zero
-            let saved = CGPoint(x: base.minX + placement.left, y: base.minY + placement.top - size.height)
+            // 映像の右端を合わせる。サイドバーが開く途中で窓が狭く並んでも、開き終えたときは右端を保って広げるので映像の位置は変わらない
+            let saved = CGPoint(x: base.minX + placement.windowLeft(videoWidth: width, frameWidth: size.width),
+                                y: base.minY + placement.top - size.height)
             let origin = ViewerWindowPositioning.resolvedOrigin(savedOrigin: saved, targetScreen: target, windowSize: size) ?? saved
             keptVideoWidth = width
             frame = NSRect(origin: origin, size: size)
@@ -322,10 +352,11 @@ final class ViewerWindowController: NSObject {
             logger.info("保存しない: 保存先と違う画面にいる")
             return
         }
+        let videoWidth = keptVideoWidth ?? videoSize.width
         let placement = ViewerWindowPlacement(
             displayUUID: userInitiated ? uuid : (saved?.displayUUID ?? uuid),
-            left: window.frame.minX - screen.frame.minX, top: window.frame.maxY - screen.frame.minY,
-            videoWidth: keptVideoWidth ?? videoSize.width)
+            videoLeft: window.frame.maxX - videoWidth - screen.frame.minX, top: window.frame.maxY - screen.frame.minY,
+            videoWidth: videoWidth)
         guard placement != saved else { return }
         AppSettings.viewerWindowPlacement = placement
     }
@@ -337,7 +368,8 @@ final class ViewerWindowController: NSObject {
         let size = window.frame.size
         let target = placement.displayUUID.flatMap(NSScreen.screen(forUUID:))
         let base = (target ?? ViewerWindowPositioning.primaryScreen())?.frame ?? .zero
-        let saved = CGPoint(x: base.minX + placement.left, y: base.minY + placement.top - size.height)
+        let saved = CGPoint(x: base.minX + placement.windowLeft(videoWidth: keptVideoWidth ?? videoSize.width, frameWidth: size.width),
+                            y: base.minY + placement.top - size.height)
         guard let origin = ViewerWindowPositioning.resolvedOrigin(savedOrigin: saved, targetScreen: target, windowSize: size),
               origin != window.frame.origin else { return }
         logger.info("画面の構成が変わったので置き直した: 保存先の画面 \(target == nil ? "なし" : "あり", privacy: .public)")
@@ -416,10 +448,7 @@ final class ViewerWindowController: NSObject {
     /// 開閉の後になる（記録で、隠す途中の映像の比が 2.18 まで外れた）。`isCollapsed` は開閉の始めに変わる。
     /// ツールバーのボタン・メニュー（⌃⌘S）のどちらから開閉しても同じ時点で捉えられる
     private func observeSidebar(in window: NSWindow) {
-        guard sidebarObservation == nil,
-              let splitView = Self.firstSplitView(in: window.contentView),
-              let controller = splitView.delegate as? NSSplitViewController,
-              let item = controller.splitViewItems.first else {
+        guard sidebarObservation == nil, let item = Self.sidebarItem(in: window) else {
             logger.info("サイドバーの見張りを付けられない（NSSplitViewController が見つからない）")
             return
         }
@@ -427,6 +456,24 @@ final class ViewerWindowController: NSObject {
             guard let old = change.oldValue, let new = change.newValue, old != new else { return }
             MainActor.assumeIsolated { self?.sidebarWillChange(showing: !new) }
         }
+    }
+
+    /// 前回のサイドバーの開閉を、アニメーションなしで当てる。
+    /// SwiftUI の `columnVisibility` の初期値は効かない（`.detailOnly` で始めても、起動するとサイドバーが出ていた。
+    /// AppKit の分割ビューの自動保存が後から当てているとみられる）ので、窓が画面に出た後に AppKit のサイドバーを直接畳む。
+    /// 開閉の見張りを付ける前なので、窓の幅を合わせる処理は動かない。SwiftUI の表示状態は AppKit から追従する
+    private func applySavedSidebar(in window: NSWindow?) {
+        guard let window, let item = Self.sidebarItem(in: window) else { return }
+        let collapsed = !AppSettings.viewerSidebarVisible
+        guard item.isCollapsed != collapsed else { return }
+        item.isCollapsed = collapsed
+        logger.info("前回のサイドバーの開閉を当てた: \(collapsed ? "隠す" : "出す", privacy: .public)")
+    }
+
+    private static func sidebarItem(in window: NSWindow) -> NSSplitViewItem? {
+        guard let splitView = firstSplitView(in: window.contentView),
+              let controller = splitView.delegate as? NSSplitViewController else { return nil }
+        return controller.splitViewItems.first
     }
 
     private static func firstSplitView(in view: NSView?) -> NSSplitView? {
