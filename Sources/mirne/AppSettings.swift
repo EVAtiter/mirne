@@ -25,6 +25,12 @@ enum AppSettings {
         static let viewerWindowPlacement = "viewerWindowPlacement"
         /// 視聴ウィンドウのサイドバー（チャンネル一覧）を出しているか
         static let viewerSidebarVisible = "viewerSidebarVisible"
+        /// 番組表でジャンルをどう示すか（GuideGenreStyle の rawValue）
+        static let guideGenreStyle = "guideGenreStyle"
+        /// 番組表のジャンルの色（GuideGenreColors の JSON）
+        static let guideGenreColors = "guideGenreColors"
+        /// 番組表のウィンドウの位置と大きさ（GuideWindowPlacement の JSON）
+        static let guideWindowPlacement = "guideWindowPlacement"
     }
 
     /// 外部フィルタの設定。未設定ならフィルタを使わない
@@ -104,6 +110,30 @@ enum AppSettings {
     static var viewerSidebarVisible: Bool {
         get { UserDefaults.standard.object(forKey: Key.viewerSidebarVisible) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Key.viewerSidebarVisible) }
+    }
+
+    /// 番組表でジャンルをどう示すか。未設定なら左端の色の帯
+    static var guideGenreStyle: GuideGenreStyle {
+        get { UserDefaults.standard.string(forKey: Key.guideGenreStyle).flatMap(GuideGenreStyle.init(rawValue:)) ?? .stripe }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Key.guideGenreStyle) }
+    }
+
+    /// 番組表のジャンルの色。未設定なら既定の色
+    static var guideGenreColors: GuideGenreColors {
+        get {
+            UserDefaults.standard.data(forKey: Key.guideGenreColors)
+                .flatMap { try? JSONDecoder().decode(GuideGenreColors.self, from: $0) } ?? GuideGenreColors()
+        }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: Key.guideGenreColors) }
+    }
+
+    /// 番組表のウィンドウの位置と大きさ。未設定なら nil
+    static var guideWindowPlacement: GuideWindowPlacement? {
+        get {
+            UserDefaults.standard.data(forKey: Key.guideWindowPlacement)
+                .flatMap { try? JSONDecoder().decode(GuideWindowPlacement.self, from: $0) }
+        }
+        set { UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: Key.guideWindowPlacement) }
     }
 
     /// 音量の記憶。未設定なら nil

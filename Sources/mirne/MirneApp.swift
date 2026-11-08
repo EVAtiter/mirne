@@ -36,6 +36,7 @@ struct MirneApp: App {
         Window("番組表", id: WindowID.guide) {
             if let model {
                 GuideView(model: model)
+                    .background(WindowAccessor { model.guideWindowController.attach($0) })
             }
         }
         .defaultSize(GuideLayout.windowSize)

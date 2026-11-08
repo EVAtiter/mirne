@@ -36,8 +36,10 @@ public final class EPGStore: @unchecked Sendable {
         return support.appendingPathComponent("mirne", isDirectory: true).appendingPathComponent("epg.sqlite")
     }
 
-    /// 表の作りの版。変えたら作り直す
-    static let schemaVersion: Int32 = 1
+    /// 表の作りの版。変えたら作り直す（1 → 2 はジャンルの列を足すだけなので、集めた番組を残して列を足す）
+    static let schemaVersion: Int32 = 2
+    /// ジャンルの列が無い版
+    static let schemaVersionWithoutGenre: Int32 = 1
 
     private let queue = DispatchQueue(label: "com.slack-kingdom.mirne.epg")
     private var database: OpaquePointer?
@@ -71,15 +73,16 @@ public final class EPGStore: @unchecked Sendable {
                         for event in section.events {
                             try execute("""
                                 INSERT OR REPLACE INTO events
-                                (network_id, transport_stream_id, service_id, event_id, table_id, section_number, start, duration, title, text, lossless, received)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                (network_id, transport_stream_id, service_id, event_id, table_id, section_number, start, duration, title, text, lossless, received, genre)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 [.integer(event.originalNetworkID), .integer(event.transportStreamID), .integer(event.serviceID), .integer(event.eventID),
                                  .integer(section.tableID), .integer(section.sectionNumber),
                                  event.start.map { .double($0.timeIntervalSince1970) } ?? .null,
                                  event.duration.map { .integer($0) } ?? .null,
                                  .text(event.title), .text(event.text), .integer(event.lossless ? 1 : 0),
-                                 .double(receivedAt.timeIntervalSince1970)])
+                                 .double(receivedAt.timeIntervalSince1970),
+                                 event.genre.map { .integer($0.byte) } ?? .null])
                         }
                         try execute("INSERT OR REPLACE INTO services (network_id, transport_stream_id, service_id, last_received) VALUES (?, ?, ?, ?)",
                                     [.integer(section.originalNetworkID), .integer(section.transportStreamID), .integer(section.serviceID),
@@ -99,7 +102,7 @@ public final class EPGStore: @unchecked Sendable {
         queue.sync {
             var events: [BroadcastEvent] = []
             try? query("""
-                SELECT event_id, table_id, start, duration, title, text, lossless FROM events
+                SELECT event_id, table_id, start, duration, title, text, lossless, genre FROM events
                 WHERE network_id = ? AND transport_stream_id = ? AND service_id = ?
                   AND start < ? AND start + COALESCE(duration, 0) > ?
                 ORDER BY start
@@ -112,7 +115,8 @@ public final class EPGStore: @unchecked Sendable {
                     start: Date(timeIntervalSince1970: sqlite3_column_double(row, 2)),
                     duration: sqlite3_column_type(row, 3) == SQLITE_NULL ? nil : Int(sqlite3_column_int(row, 3)),
                     title: Self.text(row, 4), text: Self.text(row, 5),
-                    lossless: sqlite3_column_int(row, 6) != 0))
+                    lossless: sqlite3_column_int(row, 6) != 0,
+                    genre: sqlite3_column_type(row, 7) == SQLITE_NULL ? nil : ProgramGenre(byte: UInt8(truncatingIfNeeded: sqlite3_column_int(row, 7)))))
             }
             return events
         }
@@ -168,7 +172,10 @@ public final class EPGStore: @unchecked Sendable {
         try queue.sync {
             var version: Int32 = 0
             try query("PRAGMA user_version", []) { version = sqlite3_column_int($0, 0) }
-            if version != Self.schemaVersion {
+            if version == Self.schemaVersionWithoutGenre {
+                // ジャンルの列を足す。集めた番組はジャンル無し（NULL）のまま残り、巡回で集め直すと埋まる
+                try execute("ALTER TABLE events ADD COLUMN genre INTEGER", [])
+            } else if version != Self.schemaVersion {
                 // 作りが違えば捨てて作り直す（番組表は放送からまた集められる）
                 try execute("DROP TABLE IF EXISTS events", [])
                 try execute("DROP TABLE IF EXISTS services", [])
@@ -179,6 +186,7 @@ public final class EPGStore: @unchecked Sendable {
                     network_id INTEGER NOT NULL, transport_stream_id INTEGER NOT NULL, service_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
                     table_id INTEGER NOT NULL, section_number INTEGER NOT NULL,
                     start REAL, duration INTEGER, title TEXT NOT NULL, text TEXT NOT NULL, lossless INTEGER NOT NULL, received REAL NOT NULL,
+                    genre INTEGER,
                     PRIMARY KEY (network_id, transport_stream_id, service_id, event_id))
                 """, [])
             try execute("CREATE INDEX IF NOT EXISTS events_by_section ON events (network_id, transport_stream_id, service_id, table_id, section_number)", [])

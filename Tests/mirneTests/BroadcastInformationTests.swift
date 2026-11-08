@@ -55,6 +55,8 @@ enum SISample {
         var hours: Int
         var minutes: Int
         var title: [UInt8]?
+        /// コンテント記述子の本体（2 バイトずつ）。nil なら付けない
+        var content: [UInt8]? = nil
     }
 
     /// EIT のセクション
@@ -68,6 +70,9 @@ enum SISample {
                 // 短形式イベント記述子：言語「jpn」・番組名・概要（空）
                 let content: [UInt8] = [0x6A, 0x70, 0x6E, UInt8(title.count)] + title + [0]
                 descriptors = [0x4D, UInt8(content.count)] + content
+            }
+            if let content = event.content {
+                descriptors += [0x54, UInt8(content.count)] + content
             }
             func bcd(_ value: Int) -> UInt8 { UInt8((value / 10) << 4 | value % 10) }
             body += [UInt8(event.eventID >> 8), UInt8(event.eventID & 0xFF)] + event.start

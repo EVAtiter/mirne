@@ -21,6 +21,9 @@ enum GuideLayout {
     static let sheetSize = CGSize(width: 1100, height: 640)
     /// 開いたとき・「今」を押したとき、今の時刻の何時間前から見せるか
     static let hoursBeforeNow = 1
+    /// 局名の行・時刻の列・左上の角の背景。番組の欄（白・ジャンルの色）と分けて、表の枠として見せる。
+    /// 3 つとも同じ不透明の色にする（局名の行は半透明の `.bar`、時刻の列は白で揃っていなかった。時刻の列は番組の欄の上に重なるので、透けない色が要る）
+    static var frameBackground: Color { Color(nsColor: .windowBackgroundColor) }
 }
 
 /// 番組の欄にマウスを置いたときに出す吹き出し（番組の内容）。
@@ -145,7 +148,8 @@ struct GuideView: View {
                             HStack(alignment: .top, spacing: 0) {
                                 hourAnchors
                                 ForEach(columns) { column in
-                                    ColumnView(column: column, now: model.guideNow, height: dayHeight) { select(column.entry) }
+                                    ColumnView(column: column, now: model.guideNow, height: dayHeight,
+                                               genreStyle: model.guideGenreStyle, genreColors: model.guideGenreColors) { select(column.entry) }
                                 }
                             }
                             nowLine(width: GuideLayout.rulerWidth + GuideLayout.columnWidth * CGFloat(columns.count))
@@ -176,7 +180,7 @@ struct GuideView: View {
             Color.clear.frame(width: GuideLayout.rulerWidth)
             stationHeaders
         }
-        .background(.bar)
+        .background(GuideLayout.frameBackground)
         .overlay(alignment: .bottom) { GuideRule(axis: .horizontal) }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
     }
@@ -184,7 +188,7 @@ struct GuideView: View {
     /// 左上の角（時刻の列の上・局名の行の左）。スクロールの外から重ね、横に送った局名が時刻の列の上へ入り込まないようにする。
     /// 局名の行の中に左へ留める並びを入れると、行の高さが決まらず局名が上で切れた
     private var corner: some View {
-        Rectangle().fill(.bar)
+        Rectangle().fill(GuideLayout.frameBackground)
             .frame(width: GuideLayout.rulerWidth, height: headerHeight)
             .overlay(alignment: .bottom) { GuideRule(axis: .horizontal) }
             .overlay(alignment: .trailing) { GuideRule(axis: .vertical) }
@@ -242,7 +246,7 @@ struct GuideView: View {
             }
             nowLine(width: GuideLayout.rulerWidth)
         }
-        .background(.background)
+        .background(GuideLayout.frameBackground)
         .overlay(alignment: .trailing) { GuideRule(axis: .vertical) }
     }
 
@@ -294,13 +298,16 @@ private struct ColumnView: View {
     let column: GuideView.Column
     let now: Date
     let height: CGFloat
+    let genreStyle: GuideGenreStyle
+    let genreColors: GuideGenreColors
     let select: () -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Rectangle().fill(column.coverage == nil ? AnyShapeStyle(.quaternary.opacity(0.4)) : AnyShapeStyle(.background))
             ForEach(column.placements) { placement in
-                ProgramCell(placement: placement, now: now, select: select)
+                ProgramCell(placement: placement, now: now, genreStyle: genreStyle,
+                            genreColor: placement.event.genre.map { genreColors.color(for: GuideGenreCategory($0)) }, select: select)
                     .offset(y: CGFloat(placement.offsetMinutes) * GuideLayout.pointsPerMinute)
             }
         }
@@ -356,6 +363,9 @@ private struct ColumnView: View {
 private struct ProgramCell: View {
     let placement: GuidePlacement
     let now: Date
+    let genreStyle: GuideGenreStyle
+    /// ジャンルの色。ジャンルが無い番組は nil（色を付けない）
+    let genreColor: Color?
     let select: () -> Void
 
     private var event: BroadcastEvent { placement.event }
@@ -365,6 +375,14 @@ private struct ProgramCell: View {
         return start <= now && now < (event.end ?? start)
     }
     private var hasEnded: Bool { (event.end ?? .distantFuture) <= now }
+
+    /// 欄の背景。背景を塗る設定ならジャンルの淡い色、そうでなければ放送中の番組だけを強調色で塗る
+    private var background: AnyShapeStyle {
+        if genreStyle.paintsBackground {
+            return genreColor.map { AnyShapeStyle($0.opacity(GuideGenreLayout.backgroundOpacity)) } ?? AnyShapeStyle(.clear)
+        }
+        return isOnAir ? AnyShapeStyle(Color.accentColor.opacity(0.18)) : AnyShapeStyle(.clear)
+    }
 
     var body: some View {
         Button(action: select) {
@@ -384,9 +402,21 @@ private struct ProgramCell: View {
             }
             .padding(.horizontal, 5)
             .padding(.vertical, 3)
+            .padding(.leading, genreStyle.showsStripe ? GuideGenreLayout.stripeWidth : 0)
             .frame(width: GuideLayout.columnWidth, height: height, alignment: .topLeading)
-            .background(isOnAir ? AnyShapeStyle(Color.accentColor.opacity(0.18)) : AnyShapeStyle(.clear))
+            .background(background)
+            .overlay(alignment: .leading) {
+                if genreStyle.showsStripe, let genreColor {
+                    Rectangle().fill(genreColor).frame(width: GuideGenreLayout.stripeWidth)
+                }
+            }
             .opacity(hasEnded ? 0.55 : 1)
+            .overlay {
+                // 背景をジャンルの色で塗るときは、放送中の番組を塗らずに枠で示す
+                if isOnAir, genreStyle.paintsBackground {
+                    Rectangle().strokeBorder(Color.accentColor, lineWidth: GuideGenreLayout.onAirOutlineWidth)
+                }
+            }
             .clipped()
             .contentShape(Rectangle())
             .overlay(alignment: .top) { GuideRule(axis: .horizontal) }

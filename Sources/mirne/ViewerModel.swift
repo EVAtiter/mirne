@@ -58,6 +58,8 @@ final class ViewerModel {
     let captions: CaptionOverlayModel
     /// 視聴ウィンドウの最前面・大きさ・位置
     let windowController = ViewerWindowController()
+    /// 番組表のウィンドウ（別ウィンドウで開いたとき）の位置と大きさ
+    @ObservationIgnored let guideWindowController = GuideWindowController()
 
     /// チャンネル一覧（まだスキャンしていなければ nil）
     private(set) var channels: ChannelList?
@@ -103,6 +105,14 @@ final class ViewerModel {
     /// 起動したときに前回の局を選局するか
     var autoTuneLastChannel: Bool {
         didSet { AppSettings.autoTuneLastChannel = autoTuneLastChannel }
+    }
+    /// 番組表でジャンルをどう示すか
+    var guideGenreStyle: GuideGenreStyle = AppSettings.guideGenreStyle {
+        didSet { AppSettings.guideGenreStyle = guideGenreStyle }
+    }
+    /// 番組表のジャンルの色
+    var guideGenreColors: GuideGenreColors = AppSettings.guideGenreColors {
+        didSet { AppSettings.guideGenreColors = guideGenreColors }
     }
     /// デインターレースの方式
     var deinterlace: DeinterlaceMode {

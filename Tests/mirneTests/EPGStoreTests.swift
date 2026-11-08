@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 
 @Suite("EPGStore（番組表の保存）")
@@ -43,6 +44,68 @@ struct EPGStoreTests {
         #expect(coverage?.latestEnd == SISample.date(2026, 11, 4, 23, 30))
         #expect(coverage?.eventCount == 2)
         #expect(reopened.storedServices().map(\.serviceID) == [1024])
+    }
+
+    @Test("コンテント記述子の最初のジャンルを読み、拡張（大分類 0xE）は飛ばす")
+    func parsesGenre() {
+        let parsed = section(sectionNumber: 0, events: [
+            // 拡張 0xE0 の後にスポーツ・野球（0x10）
+            .init(eventID: 1, start: SISample.time(2026, 11, 4, 22, 0), hours: 1, minutes: 0, title: SISample.title, content: [0xE0, 0x01, 0x10, 0xFF]),
+            .init(eventID: 2, start: SISample.time(2026, 11, 4, 23, 0), hours: 1, minutes: 0, title: SISample.next),
+        ])
+        #expect(parsed.events.map(\.genre) == [ProgramGenre(major: 0x1, minor: 0x0), nil])
+    }
+
+    @Test("ジャンルを保存して取り出せる")
+    func persistsGenre() throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = try EPGStore(fileURL: file)
+        store.save([section(sectionNumber: 0, events: [
+            .init(eventID: 1, start: SISample.time(2026, 11, 4, 22, 0), hours: 1, minutes: 0, title: SISample.title, content: [0x31, 0xFF]),
+            .init(eventID: 2, start: SISample.time(2026, 11, 4, 23, 0), hours: 1, minutes: 0, title: SISample.next),
+        ])], receivedAt: now)
+        let found = store.events(networkID: networkID, transportStreamID: transportStreamID, serviceID: 1024,
+                                 overlapping: SISample.date(2026, 11, 4, 0, 0)..<SISample.date(2026, 11, 5, 0, 0))
+        #expect(found.map(\.genre) == [ProgramGenre(major: 0x3, minor: 0x1), nil])
+    }
+
+    @Test("ジャンルの列が無い前の版の番組表は、集めた番組を残して列を足す")
+    func migratesFromVersionWithoutGenre() throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // 前の版（1）の作りを手で作り、番組を 1 つ入れておく
+        var database: OpaquePointer?
+        #expect(sqlite3_open(file.path, &database) == SQLITE_OK)
+        let start = SISample.date(2026, 11, 4, 22, 0).timeIntervalSince1970
+        let statements = [
+            """
+            CREATE TABLE events (
+                network_id INTEGER NOT NULL, transport_stream_id INTEGER NOT NULL, service_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
+                table_id INTEGER NOT NULL, section_number INTEGER NOT NULL,
+                start REAL, duration INTEGER, title TEXT NOT NULL, text TEXT NOT NULL, lossless INTEGER NOT NULL, received REAL NOT NULL,
+                PRIMARY KEY (network_id, transport_stream_id, service_id, event_id))
+            """,
+            "CREATE TABLE services (network_id INTEGER NOT NULL, transport_stream_id INTEGER NOT NULL, service_id INTEGER NOT NULL, last_received REAL NOT NULL, PRIMARY KEY (network_id, transport_stream_id, service_id))",
+            "INSERT INTO events VALUES (\(networkID), \(transportStreamID), 1024, 7, 80, 0, \(start), 3600, '前の版', '', 1, \(now.timeIntervalSince1970))",
+            "PRAGMA user_version = 1",
+        ]
+        for sql in statements { #expect(sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK) }
+        sqlite3_close(database)
+
+        let store = try EPGStore(fileURL: file)
+        let found = store.events(networkID: networkID, transportStreamID: transportStreamID, serviceID: 1024,
+                                 overlapping: SISample.date(2026, 11, 4, 0, 0)..<SISample.date(2026, 11, 5, 0, 0))
+        #expect(found.map(\.eventID) == [7])
+        #expect(found.first?.genre == nil)
+        // 足した列に書ける
+        store.save([section(sectionNumber: 1, events: [
+            .init(eventID: 8, start: SISample.time(2026, 11, 4, 23, 0), hours: 1, minutes: 0, title: SISample.next, content: [0x60, 0xFF]),
+        ])], receivedAt: now)
+        #expect(events(store) == [7, 8])
+        #expect(store.events(networkID: networkID, transportStreamID: transportStreamID, serviceID: 1024,
+                             overlapping: SISample.date(2026, 11, 4, 23, 0)..<SISample.date(2026, 11, 5, 0, 0)).last?.genre == ProgramGenre(major: 0x6, minor: 0x0))
     }
 
     @Test("同じセクションの新しい版で、載らなくなった番組を消す。別のセクションへ移った番組は残す")

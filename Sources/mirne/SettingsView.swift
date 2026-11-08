@@ -13,6 +13,8 @@ enum SettingsLayout {
     static let channelNameFieldWidth: CGFloat = 220
     /// 並べ替えのつかむ印の大きさ（つかみやすいよう、印より広く取る）
     static let channelDragHandleWidth: CGFloat = 24
+    /// 番組表の欄は 13 のジャンルの色が並ぶので、示し方とあわせてスクロールせずに見える高さにする
+    static let guidePaneHeight: CGFloat = 820
 }
 
 /// 設定の画面。外部フィルタ・coaxd の場所・チャンネルの編集・デインターレース・字幕の既定。
@@ -29,6 +31,8 @@ struct SettingsView: View {
                 .tabItem { Label("チャンネル", systemImage: "list.number") }
             VideoSettingsPane(model: model)
                 .tabItem { Label("映像", systemImage: "tv") }
+            GuideSettingsPane(model: model)
+                .tabItem { Label("番組表", systemImage: "list.bullet.rectangle") }
         }
         .frame(width: SettingsLayout.width)
     }
@@ -333,5 +337,44 @@ private struct VideoSettingsPane: View {
             Toggle("起動したときに字幕を表示する", isOn: $model.captionsByDefault)
         }
         .formStyle(.grouped)
+    }
+}
+
+/// 番組表：ジャンルの示し方と、ジャンルごとの色
+private struct GuideSettingsPane: View {
+    @Bindable var model: ViewerModel
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("ジャンルの示し方", selection: $model.guideGenreStyle) {
+                    ForEach(GuideGenreStyle.allCases) { style in
+                        Text(style.label).tag(style)
+                    }
+                }
+            } footer: {
+                Text("番組のジャンルは、放送の番組情報から集めます。まだ集め直していない番組には色が付きません。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Section("ジャンルの色") {
+                ForEach(GuideGenreCategory.allCases) { category in
+                    ColorPicker(category.name, selection: color(for: category), supportsOpacity: false)
+                }
+                Button("既定の色に戻す") { model.guideGenreColors = GuideGenreColors() }
+                    .disabled(model.guideGenreColors.isDefault)
+            }
+            .disabled(model.guideGenreStyle == .none)
+        }
+        .formStyle(.grouped)
+        .frame(height: SettingsLayout.guidePaneHeight)
+    }
+
+    private func color(for category: GuideGenreCategory) -> Binding<Color> {
+        Binding {
+            model.guideGenreColors.color(for: category)
+        } set: { color in
+            model.guideGenreColors.set(color, for: category)
+        }
     }
 }

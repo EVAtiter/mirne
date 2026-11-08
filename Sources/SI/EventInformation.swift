@@ -16,11 +16,47 @@ public struct BroadcastEvent: Sendable, Equatable {
     public var text: String
     /// 番組名と概要が欠けなく復号できたか
     public var lossless: Bool
+    /// ジャンル（コンテント記述子の最初のジャンル）。放送が付けていない・まだ集め直していない番組は nil
+    public var genre: ProgramGenre? = nil
 
     /// 終了時刻。開始か長さが不明なら nil
     public var end: Date? {
         guard let start, let duration else { return nil }
         return start.addingTimeInterval(TimeInterval(duration))
+    }
+}
+
+/// 番組のジャンル（ARIB STD-B10 のコンテント記述子の content_nibble_level_1・level_2）。
+public struct ProgramGenre: Sendable, Equatable, Hashable {
+    /// 大分類（0x0〜0xF）
+    public var major: UInt8
+    /// 中分類（0x0〜0xF）
+    public var minor: UInt8
+
+    public init(major: UInt8, minor: UInt8) {
+        self.major = major & 0x0F
+        self.minor = minor & 0x0F
+    }
+
+    /// 1 バイト（上位 4 ビットが大分類）から。番組表のデータベースに 1 列で持つため
+    public init(byte: UInt8) {
+        self.init(major: byte >> 4, minor: byte & 0x0F)
+    }
+
+    public var byte: UInt8 { major << 4 | minor }
+
+    /// 大分類 0xE は「拡張」（番組付属情報などで、ジャンルそのものではない）
+    static let extensionMajor: UInt8 = 0xE
+
+    /// コンテント記述子の本体（2 バイトずつ：level_1・level_2・user_nibble × 2）から、拡張を除いた最初のジャンル
+    static func first(inContentDescriptor body: ArraySlice<UInt8>) -> ProgramGenre? {
+        var index = body.startIndex
+        while index + 1 < body.endIndex {
+            let genre = ProgramGenre(byte: body[index])
+            if genre.major != extensionMajor { return genre }
+            index += 2
+        }
+        return nil
     }
 }
 
@@ -57,6 +93,8 @@ enum SITables {
     static let tableIDTOT: UInt8 = 0x73
     /// 短形式イベント記述子
     static let shortEventDescriptor: UInt8 = 0x4D
+    /// コンテント記述子（ジャンル）
+    static let contentDescriptor: UInt8 = 0x54
 
     /// 日本時間
     static let japan = TimeZone(secondsFromGMT: 9 * 3600)!
@@ -106,11 +144,21 @@ enum SITables {
             let loopLength = Int(section[offset + 10] & 0x0F) << 8 | Int(section[offset + 11])
             let loopEnd = offset + 12 + loopLength
             guard loopEnd <= end else { break }
-            for (tag, body) in PSI.descriptors(section, from: offset + 12, to: loopEnd) where tag == shortEventDescriptor {
-                guard let (title, text, lossless) = shortEvent(body) else { continue }
+            var short: (String, String, Bool)?
+            var genre: ProgramGenre?
+            for (tag, body) in PSI.descriptors(section, from: offset + 12, to: loopEnd) {
+                switch tag {
+                case shortEventDescriptor: short = short ?? shortEvent(body)
+                case contentDescriptor: genre = genre ?? ProgramGenre.first(inContentDescriptor: body)
+                default: break
+                }
+            }
+            // 番組名の無い番組（拡張情報だけのセクション）は載せない
+            if let (title, text, lossless) = short {
                 events.append(BroadcastEvent(tableID: tableID, serviceID: serviceID, eventID: eventID,
                                              transportStreamID: transportStreamID, originalNetworkID: originalNetworkID,
-                                             start: start, duration: duration, title: title, text: text, lossless: lossless))
+                                             start: start, duration: duration, title: title, text: text, lossless: lossless,
+                                             genre: genre))
             }
             offset = loopEnd
         }
