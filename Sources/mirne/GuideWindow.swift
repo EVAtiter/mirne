@@ -45,14 +45,18 @@ final class GuideWindowController: NSObject {
     private var reconfiguring = false
     private var isFullScreen = false
     private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "guide-window")
+    /// 窓を開き直した（番組表を「今」の位置へ送り直す）
+    var onReopen: (() -> Void)?
 
     /// 番組表のウィンドウが決まった（開き直したときも呼ばれる）
     func attach(_ window: NSWindow) {
         guard window !== self.window || closed else { return }
+        let reopened = window === self.window && closed
         if window !== self.window {
             self.window = window
             observe(window)
         }
+        if reopened { onReopen?() }
         closed = false
         restored = false
         restoreTask?.cancel()

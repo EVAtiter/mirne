@@ -82,6 +82,8 @@ struct GuideView: View {
                 grid
             }
         }
+        // 別ウィンドウは閉じても SwiftUI が隠しておくだけなので、開き直すと前に見ていた日と位置のまま出る。開き直したら「今」と同じにする
+        .onChange(of: model.guideWindowShowCount) { showNow() }
         .task(id: ReloadKey(day: selectedDay, revision: model.playback.broadcast.scheduleRevision, patrolRevision: model.patrolRevision, lineup: model.lineup.map(\.id))) {
             reload()
         }
@@ -107,10 +109,7 @@ struct GuideView: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
-            Button("今") {
-                selectedDay = days.first
-                scrollRequest += 1
-            }
+            Button("今", action: showNow)
             if columns.contains(where: { $0.coverage == nil }) {
                 Text("番組表は、視聴した局の分だけ集まります")
                     .font(.callout)
@@ -124,6 +123,12 @@ struct GuideView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// 今日の、今の時刻の少し前へ送る（「今」ボタン・番組表を開き直したとき）
+    private func showNow() {
+        selectedDay = days.first
+        scrollRequest += 1
     }
 
     private var dayIndex: Int? {
@@ -412,9 +417,10 @@ private struct ProgramCell: View {
             }
             .opacity(hasEnded ? 0.55 : 1)
             .overlay {
-                // 背景をジャンルの色で塗るときは、放送中の番組を塗らずに枠で示す
+                // 背景をジャンルの色で塗るときは、放送中の番組を塗らずに枠で示す。枠は帯と同じジャンルの色で描く
+                // （ジャンルが無い番組は強調色）
                 if isOnAir, genreStyle.paintsBackground {
-                    Rectangle().strokeBorder(Color.accentColor, lineWidth: GuideGenreLayout.onAirOutlineWidth)
+                    Rectangle().strokeBorder(genreColor ?? Color.accentColor, lineWidth: GuideGenreLayout.onAirOutlineWidth)
                 }
             }
             .clipped()

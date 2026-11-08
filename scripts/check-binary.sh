@@ -3,7 +3,7 @@
 #
 #   scripts/check-binary.sh build/symroot/Release/mirne.app
 #
-# .app の中の Mach-O をすべて調べ、ホームのパスと .leakcheck.local のパターンを探す。
+# .app の中の Mach-O をすべて調べ、ホームのパスと、.leakcheck.local があればそのパターンを探す。
 # コード署名の中（証明書の名義・Team ID）は署名の仕組み上必ず入るので、
 # 「本体」と「署名」を分けて数え、本体に 1 つでもあれば失敗にする。
 #

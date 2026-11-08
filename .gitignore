@@ -6,10 +6,10 @@ build/
 *.dSYM/
 *.xcarchive/
 
-# ── 個人の開発環境（公開しない） ──
+# ── 手元の開発環境 ──
 # 署名チーム・証明書名は Config/Local.xcconfig に置く（雛形は Local.xcconfig.example）
 Config/Local.xcconfig
-# 漏れ検査で探す個人情報のパターン（雛形は .leakcheck.example）
+# 漏れの検査で探す個人の情報のパターン
 .leakcheck.local
 CLAUDE.md
 .claude/

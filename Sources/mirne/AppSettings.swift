@@ -112,9 +112,9 @@ enum AppSettings {
         set { UserDefaults.standard.set(newValue, forKey: Key.viewerSidebarVisible) }
     }
 
-    /// 番組表でジャンルをどう示すか。未設定なら左端の色の帯
+    /// 番組表でジャンルをどう示すか。未設定なら帯と背景の両方
     static var guideGenreStyle: GuideGenreStyle {
-        get { UserDefaults.standard.string(forKey: Key.guideGenreStyle).flatMap(GuideGenreStyle.init(rawValue:)) ?? .stripe }
+        get { UserDefaults.standard.string(forKey: Key.guideGenreStyle).flatMap(GuideGenreStyle.init(rawValue:)) ?? .both }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: Key.guideGenreStyle) }
     }
 

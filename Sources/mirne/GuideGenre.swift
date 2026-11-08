@@ -31,10 +31,11 @@ enum GuideGenreStyle: String, CaseIterable, Codable, Identifiable {
 enum GuideGenreLayout {
     /// 左端の色の帯の幅
     static let stripeWidth: CGFloat = 4
+    /// 背景を塗るときに放送中の番組を囲む枠の太さ。色は帯と同じジャンルの色にする（帯が枠の左の辺に重なる）。
+    /// 帯と同じ 4pt では表の中で太すぎたので、帯より細くした
+    static let onAirOutlineWidth: CGFloat = 2
     /// 背景を塗るときの濃さ（ライト・ダークのどちらでも文字が読める淡さ）
     static let backgroundOpacity: Double = 0.22
-    /// 背景を塗るときに放送中の番組を囲む枠の太さ（背景の色と重ならないよう、塗らずに枠で示す）
-    static let onAirOutlineWidth: CGFloat = 2.5
 }
 
 /// ジャンルの大分類（ARIB STD-B10 の content_nibble_level_1）。色はこの単位で付ける
