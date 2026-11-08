@@ -82,7 +82,8 @@ struct GuideView: View {
                 grid
             }
         }
-        // 別ウィンドウは閉じても SwiftUI が隠しておくだけなので、開き直すと前に見ていた日と位置のまま出る。開き直したら「今」と同じにする
+        // 別ウィンドウを開いたら（窓を見せた後で）「今」と同じにする。閉じても SwiftUI が隠しておくだけなので、
+        // そのままでは開き直したときに前に見ていた日と位置のまま出る
         .onChange(of: model.guideWindowShowCount) { showNow() }
         .task(id: ReloadKey(day: selectedDay, revision: model.playback.broadcast.scheduleRevision, patrolRevision: model.patrolRevision, lineup: model.lineup.map(\.id))) {
             reload()

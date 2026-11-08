@@ -60,7 +60,7 @@ final class ViewerModel {
     let windowController = ViewerWindowController()
     /// 番組表のウィンドウ（別ウィンドウで開いたとき）の位置と大きさ
     @ObservationIgnored let guideWindowController = GuideWindowController()
-    /// 番組表の別ウィンドウを開き直した回数（番組表がこれを見て「今」の位置へ送り直す）
+    /// 番組表の別ウィンドウを開いて見せた回数（番組表がこれを見て「今」の位置へ送る）
     var guideWindowShowCount = 0
 
     /// チャンネル一覧（まだスキャンしていなければ nil）
@@ -212,7 +212,7 @@ final class ViewerModel {
     private func watchViewerWindow() {
         windowController.onClose = { [weak self] in self?.viewerWindowClosed() }
         windowController.onReopen = { [weak self] in self?.viewerWindowReopened() }
-        guideWindowController.onReopen = { [weak self] in self?.guideWindowShowCount += 1 }
+        guideWindowController.onShow = { [weak self] in self?.guideWindowShowCount += 1 }
     }
 
     private func viewerWindowClosed() {

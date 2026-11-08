@@ -45,18 +45,19 @@ final class GuideWindowController: NSObject {
     private var reconfiguring = false
     private var isFullScreen = false
     private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "guide-window")
-    /// 窓を開き直した（番組表を「今」の位置へ送り直す）
-    var onReopen: (() -> Void)?
+    /// 窓を開いて、位置と大きさを戻し終えて見せた（初めて開いたときも、開き直したときも。番組表を「今」の位置へ送る）
+    var onShow: (() -> Void)?
+    /// 開いた窓をまだ見せていない（見せたら `onShow` を 1 回呼ぶ）
+    private var pendingShow = false
 
     /// 番組表のウィンドウが決まった（開き直したときも呼ばれる）
     func attach(_ window: NSWindow) {
         guard window !== self.window || closed else { return }
-        let reopened = window === self.window && closed
         if window !== self.window {
             self.window = window
             observe(window)
         }
-        if reopened { onReopen?() }
+        pendingShow = true
         closed = false
         restored = false
         restoreTask?.cancel()
@@ -152,6 +153,12 @@ final class GuideWindowController: NSObject {
         revealTask?.cancel()
         revealTask = nil
         window.alphaValue = 1
+        // 「今」へ送るのは、窓が画面に出て中身を並べ終えてから。番組表の最初の読み込みのときに送ると、
+        // 窓がまだ出ておらず中身も並んでいないことがあり、送りが空振りして 1 日の始まりのまま出た（起動して初めて開いたとき）
+        if pendingShow {
+            pendingShow = false
+            onShow?()
+        }
     }
 
     /// 位置と大きさを保存する。`userInitiated` でなければ保存先の画面に触らず、保存先と違う画面にいるときは位置も捨てる
