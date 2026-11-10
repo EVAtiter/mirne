@@ -37,6 +37,10 @@ public final class BroadcastInformation {
     public private(set) var presentFollowing: [UInt16: PresentFollowing] = [:]
     /// 放送の時刻。TOT か TDT が届くまで nil
     public private(set) var clock: BroadcastClock?
+    /// 放送の時刻と Mac の時刻の差（秒に丸めたもの）。TOT か TDT が届くまで nil。
+    /// `clock` は時刻が届くたび（数秒ごと）に変わるが、こちらは差が変わったときだけ変わる。
+    /// 分の単位で足りる画面（番組表）は、こちらを見て描き直しを減らす
+    public private(set) var clockOffsetSeconds: Int?
     /// 番組表のセクション（EPGStore へ保存する）
     @ObservationIgnored private var scheduleSections: [ScheduleKey: EITSection] = [:]
     /// 番組表が変わった回数（画面が読み直す合図）
@@ -59,6 +63,7 @@ public final class BroadcastInformation {
         generation += 1
         presentFollowing = [:]
         clock = nil
+        if clockOffsetSeconds != nil { clockOffsetSeconds = nil }
         scheduleSections = [:]
         scheduleRevision += 1
         return generation
@@ -71,7 +76,10 @@ public final class BroadcastInformation {
         for item in items {
             switch item {
             case let .time(time):
-                clock = BroadcastClock(broadcastTime: time, receivedAt: receivedAt)
+                let received = BroadcastClock(broadcastTime: time, receivedAt: receivedAt)
+                clock = received
+                let offset = Int(received.offset.rounded())
+                if clockOffsetSeconds != offset { clockOffsetSeconds = offset }
             case let .eventSection(section) where section.isPresentFollowing:
                 var entry = presentFollowing[section.serviceID] ?? PresentFollowing()
                 switch section.sectionNumber {

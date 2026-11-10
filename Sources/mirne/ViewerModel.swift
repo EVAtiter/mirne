@@ -64,7 +64,9 @@ final class ViewerModel {
     var guideWindowShowCount = 0
 
     /// チャンネル一覧（まだスキャンしていなければ nil）
-    private(set) var channels: ChannelList?
+    private(set) var channels: ChannelList? {
+        didSet { rebuildLineup() }
+    }
     /// 選んでいるサービス
     private(set) var current: ChannelList.Entry?
     /// 読み込み・スキャンの失敗
@@ -99,6 +101,7 @@ final class ViewerModel {
     var channelEdits: ChannelEdits {
         didSet {
             AppSettings.channelEdits = channelEdits
+            rebuildLineup()
             if let current, let edited = channels?.allServices(with: channelEdits).first(where: { $0.id == current.id }) {
                 self.current = edited
             }
@@ -193,6 +196,8 @@ final class ViewerModel {
             playback.play(output, serviceID: current.map { UInt16($0.service.serviceID) })
         }
         loadChannels()
+        // 初期化の中で値を入れたときは didSet が呼ばれないことがあるので、ここで必ず作る
+        rebuildLineup()
         showOverlay()
         checkTuner()
         observeSleep()
@@ -212,6 +217,7 @@ final class ViewerModel {
     private func watchViewerWindow() {
         windowController.onClose = { [weak self] in self?.viewerWindowClosed() }
         windowController.onReopen = { [weak self] in self?.viewerWindowReopened() }
+        windowController.onVisibilityChange = { [weak renderer = self.renderer] visible in renderer?.isOnScreen = visible }
         guideWindowController.onShow = { [weak self] in self?.guideWindowShowCount += 1 }
     }
 
@@ -234,6 +240,8 @@ final class ViewerModel {
     private func viewerWindowReopened() {
         patrolStart?.cancel()
         patrolStart = nil
+        // 閉じている間にスリープすると描画が止まったままになることがあるので、開き直したら張り直す
+        renderer?.restartDrawing(reason: "視聴ウィンドウを開いた")
         let entry = resumeAfterReopen
         resumeAfterReopen = nil
         Task {
@@ -364,10 +372,14 @@ final class ViewerModel {
         ]
     }
 
-    /// スリープの前にストリームを閉じる（チューナーと外部フィルタを手放す）
+    /// スリープの前にストリームを閉じる（チューナーと外部フィルタを手放す）。
+    /// 視聴ウィンドウを閉じている間・番組表を重ねて巡回している間は、もう視聴していないので、復帰したときに選局し直す局を覚えない。
+    /// 覚えると、復帰したときに閉じた窓のまま選局し直して隠れたまま再生し、チューナーがふさがって、窓を開き直したときの選局
+    /// （チューナーが空いているときだけ）が走らず、映像が戻らなかった
     private func willSleep() {
-        resumeAfterWake = current
-        Self.logger.notice("スリープの前に受信を止める（\(self.current?.service.name ?? "-", privacy: .public)）")
+        let viewing = !windowController.isClosed && !patrolsForGuideSheet
+        resumeAfterWake = viewing ? current : nil
+        Self.logger.notice("スリープの前に受信を止める（\(viewing ? (self.current?.service.name ?? "-") : "視聴していない", privacy: .public)）")
         reception.stop()
     }
 
@@ -375,6 +387,7 @@ final class ViewerModel {
     private func didWake() {
         guard let entry = resumeAfterWake else { return }
         resumeAfterWake = nil
+        renderer?.restartDrawing(reason: "スリープから復帰した")
         Self.logger.notice("スリープから復帰した。\(WakeTiming.retuneDelay.formatted(.units(allowed: [.seconds])), privacy: .public)後に選局し直す")
         Task {
             try? await Task.sleep(for: WakeTiming.retuneDelay)
@@ -408,8 +421,14 @@ final class ViewerModel {
 
     // MARK: - 一覧
 
-    /// 一覧に出すサービス（リモコンキーの順・主のサービスだけ）
-    var lineup: [ChannelList.Entry] { channels?.lineup(with: channelEdits) ?? [] }
+    /// 一覧に出すサービス（リモコンキーの順・主のサービスだけ）。
+    /// 並べ替えに手間がかかり、画面の描き直しのたびに何度も読まれるので、チャンネル一覧か編集が変わったときだけ作り直す
+    private(set) var lineup: [ChannelList.Entry] = []
+
+    private func rebuildLineup() {
+        let rebuilt = channels?.lineup(with: channelEdits) ?? []
+        if rebuilt != lineup { lineup = rebuilt }
+    }
 
     /// 設定の表に出す局（隠した局も含む・編集を当てた順）
     var editableStations: [ChannelList.Entry] { channels?.stations(with: channelEdits) ?? [] }
@@ -585,7 +604,11 @@ final class ViewerModel {
     var broadcastClock: BroadcastClock? { playback.broadcast.clock }
 
     /// 番組表で使う今の時刻。放送の時刻が分かっていればそれ、無ければ Mac の時刻
-    var guideNow: Date { broadcastClock?.broadcastTime(at: Date()) ?? Date() }
+    var guideNow: Date { Date().addingTimeInterval(guideClockOffset) }
+
+    /// 番組表で使う、放送の時刻と Mac の時刻の差（秒）。放送の時刻が分かっていなければ 0。
+    /// 時刻が届くたび（数秒ごと）ではなく、差が変わったときだけ変わる（番組表を描き直しすぎないように）
+    var guideClockOffset: TimeInterval { TimeInterval(playback.broadcast.clockOffsetSeconds ?? 0) }
 
     /// 映像の上に出し続ける案内。無ければ nil。
     /// 初回の準備は、チューナー → チャンネル一覧 → 外部フィルタ の順に案内する

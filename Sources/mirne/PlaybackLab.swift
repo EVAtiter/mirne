@@ -1,5 +1,4 @@
 import AppKit
-import MetalKit
 import Observation
 import os
 import SwiftUI
@@ -145,7 +144,7 @@ final class PlaybackLab {
         lines.append("\(fileName)  経過 \(String(format: "%.1f", elapsed.seconds)) 秒・\(render.lastSize)・\(String(describing: deinterlace))")
         let window = NSApp.windows.first { $0.isVisible }
         let occlusion = window.map { $0.occlusionState.contains(.visible) ? "見えている" : "隠れている" } ?? "-"
-        lines.append("画面: \(window?.screen?.localizedName ?? "-")（最大 \(window?.screen?.maximumFramesPerSecond ?? 0) fps）・描画の大きさ \(renderer.map { "\(Int($0.view.drawableSize.width))×\(Int($0.view.drawableSize.height))" } ?? "-")")
+        lines.append("画面: \(window?.screen?.localizedName ?? "-")（最大 \(window?.screen?.maximumFramesPerSecond ?? 0) fps）・描画の大きさ \(renderer.map { "\(Int($0.drawableSize.width))×\(Int($0.drawableSize.height))" } ?? "-")")
         lines.append("draw \(String(format: "%.1f", Double(render.calls) / max(elapsed.seconds, 0.001))) 回/秒・フレームを描いた \(render.drawn)（ウィンドウは\(occlusion)）・空振り \(render.starved)・選んだフィールドの遅れの最大 \(String(format: "%.1f", render.maximumLateness)) ms・drawable 待ち最大 \(String(format: "%.1f", render.maximumDrawableWait)) ms・draw 最大 \(String(format: "%.1f", render.maximumDrawTime)) ms")
         if let sync = renderer?.avSync.summary {
             lines.append(String(format: "A/V のずれ（画面に出た時刻 − PTS。正は映像が遅れ）: 中央 %.1f ms・5〜95%% %.1f〜%.1f ms・最小 %.1f・最大 %.1f（%d 回）・描いてから出るまで %.1f ms",
@@ -412,10 +411,10 @@ extension Duration {
     }
 }
 
-/// MTKView を SwiftUI に置く
+/// 映像のビューを SwiftUI に置く
 struct MetalVideoView: NSViewRepresentable {
     let renderer: VideoRenderer
 
-    func makeNSView(context: Context) -> MTKView { renderer.view }
-    func updateNSView(_ view: MTKView, context: Context) {}
+    func makeNSView(context: Context) -> VideoLayerView { renderer.view }
+    func updateNSView(_ view: VideoLayerView, context: Context) {}
 }

@@ -20,18 +20,34 @@ public final class FrameQueue: @unchecked Sendable {
     public private(set) var lateDrops = 0
     /// 上限を超えて捨てたフレーム
     public private(set) var overflowDrops = 0
+    /// 空のときに頼まれた、次のフレームが入ったら 1 回だけ呼ぶもの（描画を止めている間の起こし役）
+    private var wakeOnPush: (@Sendable () -> Void)?
 
     public init() {}
 
     public func push(_ frame: DecodedFrame) {
         lock.lock()
-        defer { lock.unlock() }
         let index = frames.firstIndex { $0.pts > frame.pts } ?? frames.endIndex
         frames.insert(frame, at: index)
         if frames.count > Self.capacity {
             frames.removeFirst()
             overflowDrops += 1
         }
+        let wake = wakeOnPush
+        wakeOnPush = nil
+        lock.unlock()
+        // 呼び出し先がこのキューを読んでも詰まらないように、鍵を外してから呼ぶ
+        wake?()
+    }
+
+    /// 空なら、次のフレームが入ったときに `wake` を 1 回呼ぶよう覚えて true を返す。空でなければ何もせず false。
+    /// 空かどうかの判断と覚えるのを同じ鍵の中で行うので、その間に入ったフレームを取りこぼさない
+    public func wakeOnNextPushIfEmpty(_ wake: @escaping @Sendable () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard frames.isEmpty else { return false }
+        wakeOnPush = wake
+        return true
     }
 
     /// 時刻 `time`（90 kHz）に表示すべきフレーム。それより前のフレームは捨てる。

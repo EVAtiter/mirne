@@ -159,6 +159,8 @@ final class ViewerWindowController: NSObject {
     /// 窓を閉じた・開き直した（視聴を止めて番組表を巡回する・視聴に戻る）
     @ObservationIgnored var onClose: (() -> Void)?
     @ObservationIgnored var onReopen: (() -> Void)?
+    /// 窓が画面に見えているかが変わった（閉じた・しまった・隠れた。映像の描画を止める・始める）
+    @ObservationIgnored var onVisibilityChange: ((Bool) -> Void)?
     /// 自分で窓を動かしている間（そのときの移動は保存しない）
     @ObservationIgnored private var applyingFrame = false
     /// 画面の構成が変わっている間・スリープの前後（その間の移動は macOS の都合なので保存しない）
@@ -168,6 +170,8 @@ final class ViewerWindowController: NSObject {
     /// 窓が別の画面へ移った時刻（macOS が大きさを当て直すのを見分ける）
     @ObservationIgnored private var screenChangedAt: ContinuousClock.Instant?
     @ObservationIgnored private var settleTask: Task<Void, Never>?
+    /// 保存した位置と大きさの写し。窓を動かしている間は移動の知らせが続けて来るので、そのたびに設定から JSON を読み直さない
+    @ObservationIgnored private var placementCache: ViewerWindowPlacement??
     @ObservationIgnored private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "window")
 
     // MARK: - SwiftUI からの知らせ
@@ -196,6 +200,7 @@ final class ViewerWindowController: NSObject {
         // 開き直した窓は映像の部分の大きさが前と同じだと知らせが来ないので、ここから復元を始める
         if reopened, videoSize.width > 0 { scheduleRestore(window) }
         applyLevel()
+        reportVisibility()
         if reopened { onReopen?() }
     }
 
@@ -242,6 +247,9 @@ final class ViewerWindowController: NSObject {
     /// 窓をしまっている（最小化している）か。ディスプレイのスリープを止めるかの判断に使う
     var isMiniaturized: Bool { window?.isMiniaturized ?? false }
 
+    /// 窓を閉じているか（閉じている間は視聴せず、番組表を巡回している）
+    var isClosed: Bool { closed }
+
     // MARK: - 復元と保存
 
     /// 窓が画面に出てから復元する。SwiftUI は最初に窓を中身の最小の大きさで並べ、その後で位置と大きさを当てるので、
@@ -281,7 +289,7 @@ final class ViewerWindowController: NSObject {
             return
         }
         let frame: NSRect
-        if var placement = AppSettings.viewerWindowPlacement {
+        if var placement = storedPlacement {
             // 1.0.1 までの記録（窓の左端）は、先に映像の左端へ書き換える。サイドバーの開閉では窓の大きさを
             // 自分で変えるので保存が走らず、書き換えないまま閉じた状態で起動すると、映像がサイドバーの幅だけずれる。
             // 前の版はサイドバーを出した状態で起動していたので、記録の左端にサイドバーの幅を足す。幅は測った値を使うが、
@@ -291,7 +299,7 @@ final class ViewerWindowController: NSObject {
                 let sidebarWidth = chrome.width >= ViewerWindowLayout.sidebarMinimumWidth ? chrome.width : ViewerWindowLayout.sidebarIdealWidth
                 placement.videoLeft = (placement.left ?? 0) + sidebarWidth
                 placement.left = nil
-                AppSettings.viewerWindowPlacement = placement
+                storedPlacement = placement
                 logger.info("前の版の位置の記録を映像の左端へ書き換えた")
             }
             let width = max(placement.videoWidth, ViewerWindowLayout.minimumVideoWidth)
@@ -347,7 +355,7 @@ final class ViewerWindowController: NSObject {
     private func save(userInitiated: Bool) {
         guard let window, restored, !isFullScreen, !fullScreenTransition, !reconfiguring,
               let screen = window.screen, let uuid = screen.displayUUID else { return }
-        let saved = AppSettings.viewerWindowPlacement
+        let saved = storedPlacement
         if !userInitiated, let saved, saved.displayUUID != uuid {
             logger.info("保存しない: 保存先と違う画面にいる")
             return
@@ -358,13 +366,27 @@ final class ViewerWindowController: NSObject {
             videoLeft: window.frame.maxX - videoWidth - screen.frame.minX, top: window.frame.maxY - screen.frame.minY,
             videoWidth: videoWidth)
         guard placement != saved else { return }
-        AppSettings.viewerWindowPlacement = placement
+        storedPlacement = placement
+    }
+
+    /// 保存した位置と大きさ（設定を読むのは最初の 1 回だけ。書くときは写しと設定の両方へ）
+    private var storedPlacement: ViewerWindowPlacement? {
+        get {
+            if let placementCache { return placementCache }
+            let loaded = AppSettings.viewerWindowPlacement
+            placementCache = .some(loaded)
+            return loaded
+        }
+        set {
+            placementCache = .some(newValue)
+            AppSettings.viewerWindowPlacement = newValue
+        }
     }
 
     /// 画面の構成が落ち着いたら、保存した位置へ置き直す（保存先が無ければプライマリを基準に）
     private func reposition() {
         reconfiguring = false
-        guard let window, restored, !isFullScreen, let placement = AppSettings.viewerWindowPlacement else { return }
+        guard let window, restored, !isFullScreen, let placement = storedPlacement else { return }
         let size = window.frame.size
         let target = placement.displayUUID.flatMap(NSScreen.screen(forUUID:))
         let base = (target ?? ViewerWindowPositioning.primaryScreen())?.frame ?? .zero
@@ -567,7 +589,10 @@ final class ViewerWindowController: NSObject {
             // 閉じた窓を SwiftUI は壊さずに隠しておき、開き直すと同じ窓を出す（窓に載った知らせは二度目は来ない）。
             // 閉じた後に窓がまた見えるようになったことで、開き直したと見る
             center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.windowMayHaveReopened() }
+                MainActor.assumeIsolated {
+                    self?.reportVisibility()
+                    self?.windowMayHaveReopened()
+                }
             },
             center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.windowMayHaveReopened() }
@@ -615,6 +640,12 @@ final class ViewerWindowController: NSObject {
         save(userInitiated: true)
     }
 
+    /// 窓が画面に見えているか（`occlusionState` は閉じた・しまった・ほかの窓に隠れた・別の操作スペースのどれでも見えないになる）
+    private func reportVisibility() {
+        guard let window else { return }
+        onVisibilityChange?(window.isVisible && window.occlusionState.contains(.visible))
+    }
+
     private func windowMayHaveReopened() {
         guard closed, let window, window.isVisible else { return }
         attach(window)
@@ -623,6 +654,8 @@ final class ViewerWindowController: NSObject {
     private func windowWillClose() {
         guard !closed else { return }
         closed = true
+        // 閉じた窓の見え方の知らせは、閉じ終えた後に来るとは限らないので、ここで描くのを止める
+        onVisibilityChange?(false)
         onClose?()
     }
 

@@ -49,6 +49,22 @@ final class GuideWindowController: NSObject {
     var onShow: (() -> Void)?
     /// 開いた窓をまだ見せていない（見せたら `onShow` を 1 回呼ぶ）
     private var pendingShow = false
+    /// 保存した位置と大きさの写し（窓を動かしている間、移動の知らせのたびに設定から JSON を読み直さない）
+    private var placementCache: GuideWindowPlacement??
+
+    /// 保存した位置と大きさ（設定を読むのは最初の 1 回だけ。書くときは写しと設定の両方へ）
+    private var storedPlacement: GuideWindowPlacement? {
+        get {
+            if let placementCache { return placementCache }
+            let loaded = AppSettings.guideWindowPlacement
+            placementCache = .some(loaded)
+            return loaded
+        }
+        set {
+            placementCache = .some(newValue)
+            AppSettings.guideWindowPlacement = newValue
+        }
+    }
 
     /// 番組表のウィンドウが決まった（開き直したときも呼ばれる）
     func attach(_ window: NSWindow) {
@@ -90,7 +106,7 @@ final class GuideWindowController: NSObject {
         if !autosaveName.isEmpty {
             UserDefaults.standard.removeObject(forKey: autosaveKey)
         }
-        guard let placement = AppSettings.guideWindowPlacement else {
+        guard let placement = storedPlacement else {
             // 保存が無い（初めて・前の版の自動保存から）：自動保存の記録があれば自分で当てて引き継ぐ。
             // SwiftUI は開き直した窓に記録を当てないことがある（視聴ウィンドウのある画面の幅で開いた）ので、開いた位置は使わない
             // `setFrame(from:)` は記録を今の画面に合わせて置き直した（外部画面の記録が、視聴ウィンドウのある画面の幅で当たった）ので、
@@ -165,20 +181,20 @@ final class GuideWindowController: NSObject {
     private func save(userInitiated: Bool) {
         guard let window, restored, !closed, !isFullScreen, !reconfiguring,
               let screen = window.screen, let uuid = screen.displayUUID else { return }
-        let saved = AppSettings.guideWindowPlacement
+        let saved = storedPlacement
         if !userInitiated, let saved, saved.displayUUID != uuid { return }
         let placement = GuideWindowPlacement(
             displayUUID: userInitiated ? uuid : (saved?.displayUUID ?? uuid),
             left: window.frame.minX - screen.frame.minX, top: window.frame.maxY - screen.frame.minY,
             width: window.frame.width, height: window.frame.height)
         guard placement != saved else { return }
-        AppSettings.guideWindowPlacement = placement
+        storedPlacement = placement
     }
 
     /// 画面の構成が落ち着いたら、保存した位置へ置き直す
     private func reposition() {
         reconfiguring = false
-        guard let window, restored, !closed, !isFullScreen, let placement = AppSettings.guideWindowPlacement else { return }
+        guard let window, restored, !closed, !isFullScreen, let placement = storedPlacement else { return }
         let size = window.frame.size
         let target = placement.displayUUID.flatMap(NSScreen.screen(forUUID:))
         let base = (target ?? ViewerWindowPositioning.primaryScreen())?.frame ?? .zero

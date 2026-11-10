@@ -6,6 +6,8 @@ import SQLite3
 public enum EPGRetention {
     /// 終わってからこれだけたった番組を消す。番組表で、その日のすでに終わった番組も見られるように 1 日残す
     public static let keepAfterEnd: TimeInterval = 24 * 3600
+    /// 終わった番組の掃除をこの間隔より詰めて行わない（掃除は表全体を調べるので、セクションを保存するたびには行わない）
+    public static let pruneInterval: TimeInterval = 10 * 60
 }
 
 /// 番組表が届いた範囲（番組表に取得時刻を出すのに使う）。
@@ -43,6 +45,10 @@ public final class EPGStore: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.slack-kingdom.mirne.epg")
     private var database: OpaquePointer?
+    /// 準備した文（SQL の文字列ごと）。番組 1 つごとに文を準備し直さないように使い回す。`queue` の中だけで触る
+    private var statements: [String: OpaquePointer] = [:]
+    /// 最後に終わった番組を掃除した時刻（届いた時刻の基準）。`queue` の中だけで触る
+    private var lastPrune: Date?
     private static let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "epg")
 
     public init(fileURL: URL) throws {
@@ -56,6 +62,7 @@ public final class EPGStore: @unchecked Sendable {
     }
 
     deinit {
+        for statement in statements.values { sqlite3_finalize(statement) }
         sqlite3_close(database)
     }
 
@@ -69,7 +76,7 @@ public final class EPGStore: @unchecked Sendable {
                     for section in schedule {
                         try execute("DELETE FROM events WHERE network_id = ? AND transport_stream_id = ? AND service_id = ? AND table_id = ? AND section_number = ?",
                                     [.integer(section.originalNetworkID), .integer(section.transportStreamID), .integer(section.serviceID),
-                                     .integer(section.tableID), .integer(section.sectionNumber)])
+                                     .integer(section.tableID), .integer(section.sectionNumber)], reuse: true)
                         for event in section.events {
                             try execute("""
                                 INSERT OR REPLACE INTO events
@@ -82,14 +89,17 @@ public final class EPGStore: @unchecked Sendable {
                                  event.duration.map { .integer($0) } ?? .null,
                                  .text(event.title), .text(event.text), .integer(event.lossless ? 1 : 0),
                                  .double(receivedAt.timeIntervalSince1970),
-                                 event.genre.map { .integer($0.byte) } ?? .null])
+                                 event.genre.map { .integer($0.byte) } ?? .null], reuse: true)
                         }
                         try execute("INSERT OR REPLACE INTO services (network_id, transport_stream_id, service_id, last_received) VALUES (?, ?, ?, ?)",
                                     [.integer(section.originalNetworkID), .integer(section.transportStreamID), .integer(section.serviceID),
-                                     .double(receivedAt.timeIntervalSince1970)])
+                                     .double(receivedAt.timeIntervalSince1970)], reuse: true)
                     }
-                    try execute("DELETE FROM events WHERE start IS NOT NULL AND duration IS NOT NULL AND start + duration < ?",
-                                [.double(receivedAt.timeIntervalSince1970 - EPGRetention.keepAfterEnd)])
+                    if lastPrune.map({ receivedAt.timeIntervalSince($0) >= EPGRetention.pruneInterval || receivedAt < $0 }) ?? true {
+                        try execute("DELETE FROM events WHERE start IS NOT NULL AND duration IS NOT NULL AND start + duration < ?",
+                                    [.double(receivedAt.timeIntervalSince1970 - EPGRetention.keepAfterEnd)], reuse: true)
+                        lastPrune = receivedAt
+                    }
                 }
             } catch {
                 Self.logger.error("番組表を保存できない: \(error.localizedDescription, privacy: .public)")
@@ -97,48 +107,90 @@ public final class EPGStore: @unchecked Sendable {
         }
     }
 
+    /// 番組表の 1 つのサービス（ネットワーク・TS・サービスの ID）
+    public struct ServiceKey: Sendable, Hashable {
+        public var networkID: Int
+        public var transportStreamID: Int
+        public var serviceID: Int
+
+        public init(networkID: Int, transportStreamID: Int, serviceID: Int) {
+            self.networkID = networkID
+            self.transportStreamID = transportStreamID
+            self.serviceID = serviceID
+        }
+    }
+
+    /// 1 つのサービスの、番組表が届いた範囲と時間帯にかかる番組（番組表の画面の読み込み）
+    public struct ServiceSchedule: Sendable {
+        public var coverage: EPGCoverage?
+        public var events: [BroadcastEvent]
+    }
+
     /// サービスの、時間帯 `range` にかかる番組（開始時刻の順）
     public func events(networkID: Int, transportStreamID: Int, serviceID: Int, overlapping range: Range<Date>) -> [BroadcastEvent] {
         queue.sync {
-            var events: [BroadcastEvent] = []
-            try? query("""
-                SELECT event_id, table_id, start, duration, title, text, lossless, genre FROM events
-                WHERE network_id = ? AND transport_stream_id = ? AND service_id = ?
-                  AND start < ? AND start + COALESCE(duration, 0) > ?
-                ORDER BY start
-                """,
-                [.integer(networkID), .integer(transportStreamID), .integer(serviceID),
-                 .double(range.upperBound.timeIntervalSince1970), .double(range.lowerBound.timeIntervalSince1970)]) { row in
-                events.append(BroadcastEvent(
-                    tableID: UInt8(sqlite3_column_int(row, 1)), serviceID: UInt16(serviceID), eventID: UInt16(sqlite3_column_int(row, 0)),
-                    transportStreamID: UInt16(transportStreamID), originalNetworkID: UInt16(networkID),
-                    start: Date(timeIntervalSince1970: sqlite3_column_double(row, 2)),
-                    duration: sqlite3_column_type(row, 3) == SQLITE_NULL ? nil : Int(sqlite3_column_int(row, 3)),
-                    title: Self.text(row, 4), text: Self.text(row, 5),
-                    lossless: sqlite3_column_int(row, 6) != 0,
-                    genre: sqlite3_column_type(row, 7) == SQLITE_NULL ? nil : ProgramGenre(byte: UInt8(truncatingIfNeeded: sqlite3_column_int(row, 7)))))
-            }
-            return events
+            fetchEvents(ServiceKey(networkID: networkID, transportStreamID: transportStreamID, serviceID: serviceID), overlapping: range)
         }
     }
 
     /// サービスの番組表が届いた範囲。一度も届いていなければ nil
     public func coverage(networkID: Int, transportStreamID: Int, serviceID: Int) -> EPGCoverage? {
         queue.sync {
-            var coverage: EPGCoverage?
-            try? query("""
-                SELECT s.last_received, MAX(e.start + e.duration), COUNT(e.event_id) FROM services s
-                LEFT JOIN events e ON e.network_id = s.network_id AND e.transport_stream_id = s.transport_stream_id AND e.service_id = s.service_id
-                WHERE s.network_id = ? AND s.transport_stream_id = ? AND s.service_id = ?
-                GROUP BY s.service_id
-                """, [.integer(networkID), .integer(transportStreamID), .integer(serviceID)]) { row in
-                coverage = EPGCoverage(
-                    lastReceived: Date(timeIntervalSince1970: sqlite3_column_double(row, 0)),
-                    latestEnd: sqlite3_column_type(row, 1) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(row, 1)),
-                    eventCount: Int(sqlite3_column_int(row, 2)))
-            }
-            return coverage
+            fetchCoverage(ServiceKey(networkID: networkID, transportStreamID: transportStreamID, serviceID: serviceID))
         }
+    }
+
+    /// 複数のサービスの、番組表が届いた範囲と時間帯 `range` にかかる番組を、呼び出し側を止めずに読む（番組表の画面）。
+    /// 先に頼まれた保存を済ませてから読む（保存と同じ順で並ぶので、届いた番組は読める）。
+    /// 番組表がまだ届いていないサービスは、番組を読まない
+    public func schedules(of services: [ServiceKey], overlapping range: Range<Date>) async -> [ServiceSchedule] {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                let schedules = services.map { service in
+                    let coverage = fetchCoverage(service)
+                    return ServiceSchedule(coverage: coverage, events: coverage == nil ? [] : fetchEvents(service, overlapping: range))
+                }
+                continuation.resume(returning: schedules)
+            }
+        }
+    }
+
+    private func fetchEvents(_ service: ServiceKey, overlapping range: Range<Date>) -> [BroadcastEvent] {
+        var events: [BroadcastEvent] = []
+        try? query("""
+            SELECT event_id, table_id, start, duration, title, text, lossless, genre FROM events
+            WHERE network_id = ? AND transport_stream_id = ? AND service_id = ?
+              AND start < ? AND start + COALESCE(duration, 0) > ?
+            ORDER BY start
+            """,
+            [.integer(service.networkID), .integer(service.transportStreamID), .integer(service.serviceID),
+             .double(range.upperBound.timeIntervalSince1970), .double(range.lowerBound.timeIntervalSince1970)], reuse: true) { row in
+            events.append(BroadcastEvent(
+                tableID: UInt8(sqlite3_column_int(row, 1)), serviceID: UInt16(service.serviceID), eventID: UInt16(sqlite3_column_int(row, 0)),
+                transportStreamID: UInt16(service.transportStreamID), originalNetworkID: UInt16(service.networkID),
+                start: Date(timeIntervalSince1970: sqlite3_column_double(row, 2)),
+                duration: sqlite3_column_type(row, 3) == SQLITE_NULL ? nil : Int(sqlite3_column_int(row, 3)),
+                title: Self.text(row, 4), text: Self.text(row, 5),
+                lossless: sqlite3_column_int(row, 6) != 0,
+                genre: sqlite3_column_type(row, 7) == SQLITE_NULL ? nil : ProgramGenre(byte: UInt8(truncatingIfNeeded: sqlite3_column_int(row, 7)))))
+        }
+        return events
+    }
+
+    private func fetchCoverage(_ service: ServiceKey) -> EPGCoverage? {
+        var coverage: EPGCoverage?
+        try? query("""
+            SELECT s.last_received, MAX(e.start + e.duration), COUNT(e.event_id) FROM services s
+            LEFT JOIN events e ON e.network_id = s.network_id AND e.transport_stream_id = s.transport_stream_id AND e.service_id = s.service_id
+            WHERE s.network_id = ? AND s.transport_stream_id = ? AND s.service_id = ?
+            GROUP BY s.service_id
+            """, [.integer(service.networkID), .integer(service.transportStreamID), .integer(service.serviceID)], reuse: true) { row in
+            coverage = EPGCoverage(
+                lastReceived: Date(timeIntervalSince1970: sqlite3_column_double(row, 0)),
+                latestEnd: sqlite3_column_type(row, 1) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(row, 1)),
+                eventCount: Int(sqlite3_column_int(row, 2)))
+        }
+        return coverage
     }
 
     /// 番組表を持っているサービス（ネットワーク・TS・サービスの ID）
@@ -155,6 +207,13 @@ public final class EPGStore: @unchecked Sendable {
     /// 書き込みが終わるまで待つ（試験と終了時）
     public func flush() {
         queue.sync {}
+    }
+
+    /// 書き込みが終わるまで、呼び出し側（メインスレッド）を止めずに待つ（番組表の巡回の終わり）
+    public func flushed() async {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
     }
 
     // MARK: - 下請け
@@ -215,17 +274,33 @@ public final class EPGStore: @unchecked Sendable {
         }
     }
 
-    private func execute(_ sql: String, _ values: [Value]) throws {
-        try query(sql, values) { _ in }
+    private func execute(_ sql: String, _ values: [Value], reuse: Bool = false) throws {
+        try query(sql, values, reuse: reuse) { _ in }
     }
 
-    /// 文を実行し、行ごとに `row` を呼ぶ
-    private func query(_ sql: String, _ values: [Value], row: (OpaquePointer) -> Void) throws {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            throw EPGStoreError(message: String(cString: sqlite3_errmsg(database)))
+    /// 文を実行し、行ごとに `row` を呼ぶ。`reuse` なら準備した文を覚えて使い回す
+    /// （番組の保存・読み出しのように何度も流す文だけ。表の作りを変える文は使い回さない）
+    private func query(_ sql: String, _ values: [Value], reuse: Bool = false, row: (OpaquePointer) -> Void) throws {
+        let statement: OpaquePointer
+        if reuse, let cached = statements[sql] {
+            statement = cached
+        } else {
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &prepared, nil) == SQLITE_OK, let prepared else {
+                throw EPGStoreError(message: String(cString: sqlite3_errmsg(database)))
+            }
+            statement = prepared
+            if reuse { statements[sql] = prepared }
         }
-        defer { sqlite3_finalize(statement) }
+        defer {
+            if reuse {
+                // 次に使うときのために、実行の途中の状態と前の値を消しておく
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+            } else {
+                sqlite3_finalize(statement)
+            }
+        }
         // SQLITE_TRANSIENT: 文字列を SQLite に写させる
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         for (index, value) in values.enumerated() {

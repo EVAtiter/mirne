@@ -140,6 +140,47 @@ struct EPGStoreTests {
         #expect(events(store) == [31])
     }
 
+    @Test("終わった番組の掃除は間隔を空けて行い、間隔を過ぎた保存で消す")
+    func prunesAtInterval() throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = try EPGStore(fileURL: file)
+        // 1 回目の保存で掃除する（この時点で 1 日を過ぎた番組は無い）
+        store.save([section(sectionNumber: 0, events: [
+            .init(eventID: 50, start: SISample.time(2026, 11, 3, 21, 0), hours: 0, minutes: 30, title: SISample.title),
+        ])], receivedAt: now)
+        // 番組 50 は 11/03 21:30 に終わる。11/04 21:35 には 1 日を過ぎるが、前の掃除から間隔が空いていないので残る
+        let soon = now.addingTimeInterval(5 * 60)
+        store.save([section(sectionNumber: 8, events: [])], receivedAt: soon)
+        store.flush()
+        #expect(events(store) == [50])
+        // 間隔を過ぎた保存で消す
+        store.save([section(sectionNumber: 8, events: [])], receivedAt: now.addingTimeInterval(EPGRetention.pruneInterval))
+        store.flush()
+        #expect(events(store).isEmpty)
+    }
+
+    @Test("呼び出し側を止めずに、複数のサービスの届いた範囲と番組を読む。直前に頼んだ保存も読める")
+    func readsSchedulesAsynchronously() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = try EPGStore(fileURL: file)
+        store.save([section(sectionNumber: 8, events: [
+            .init(eventID: 60, start: SISample.time(2026, 11, 4, 22, 0), hours: 1, minutes: 0, title: SISample.title),
+            .init(eventID: 61, start: SISample.time(2026, 11, 4, 23, 0), hours: 1, minutes: 0, title: SISample.next),
+        ])], receivedAt: now)
+        let services = [1024, 1025].map { EPGStore.ServiceKey(networkID: networkID, transportStreamID: transportStreamID, serviceID: $0) }
+        let schedules = await store.schedules(of: services, overlapping: SISample.date(2026, 11, 4, 22, 30)..<SISample.date(2026, 11, 4, 23, 30))
+        #expect(schedules.map { $0.events.map(\.eventID) } == [[60, 61], []])
+        #expect(schedules.map { $0.coverage?.eventCount } == [2, nil])
+        // 使い回した文でも、続けて読み書きできる
+        store.save([section(sectionNumber: 8, events: [
+            .init(eventID: 62, start: SISample.time(2026, 11, 4, 22, 0), hours: 2, minutes: 0, title: SISample.title),
+        ])], receivedAt: now)
+        await store.flushed()
+        #expect(events(store) == [62])
+    }
+
     @Test("サービスごとに分けて持つ")
     func separatesServices() throws {
         let file = temporaryFile()

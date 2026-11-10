@@ -357,17 +357,43 @@ private struct GuideSettingsPane: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            Section("ジャンルの色") {
+            Section {
                 ForEach(GuideGenreCategory.allCases) { category in
-                    ColorPicker(category.name, selection: color(for: category), supportsOpacity: false)
+                    HStack {
+                        Toggle(isOn: colored(category)) { Text(category.name) }
+                            .toggleStyle(.checkbox)
+                        Spacer()
+                        // 色を付けないジャンルの色は使わないので、選べなくする
+                        ColorPicker(category.name, selection: color(for: category), supportsOpacity: false)
+                            .labelsHidden()
+                            .disabled(!model.guideGenreColors.isColored(category))
+                    }
                 }
-                Button("既定の色に戻す") { model.guideGenreColors = GuideGenreColors() }
-                    .disabled(model.guideGenreColors.isDefault)
+                // 色だけを既定に戻す（色を付けるかどうかはそのまま）
+                Button("既定の色に戻す") {
+                    model.guideGenreColors = GuideGenreColors(uncolored: model.guideGenreColors.uncolored)
+                }
+                .disabled(model.guideGenreColors.isDefault)
+            } header: {
+                Text("ジャンルの色")
+            } footer: {
+                Text("チェックを外したジャンルの番組には色を付けず、ジャンルの無い番組と同じに出します。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             .disabled(model.guideGenreStyle == .none)
         }
         .formStyle(.grouped)
         .frame(height: SettingsLayout.guidePaneHeight)
+    }
+
+    /// このジャンルの番組に色を付けるか
+    private func colored(_ category: GuideGenreCategory) -> Binding<Bool> {
+        Binding {
+            model.guideGenreColors.isColored(category)
+        } set: { colored in
+            model.guideGenreColors.setColored(colored, for: category)
+        }
     }
 
     private func color(for category: GuideGenreCategory) -> Binding<Color> {

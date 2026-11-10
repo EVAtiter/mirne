@@ -144,7 +144,8 @@ public final class GuidePatrol {
         tuner.stop()
         reading.cancel()
         await reading.value
-        store.flush()
+        // 書き込みの終わりは、メインスレッドを止めずに待つ（溜まった保存を待つ間、視聴の窓を開き直した・番組表を閉じたときの画面が固まらないように）
+        await store.flushed()
         // 最後まで受信した局だけ「回った」とする（途中で窓を開いて止めた局は、次の巡回でまた回る）
         let completed = !Task.isCancelled
         if completed { visited[channel.stationKey] = Date() }

@@ -51,7 +51,28 @@ public enum ProgramGuide {
         return days
     }
 
-    /// 1 日にかかる番組の位置（開始時刻の順）。開始の分からない番組は置かない
+    /// 続いた日の全体（最初の日の始まりから最後の日の終わりまで）。番組表を日をまたいで続けて並べるときの範囲
+    public static func span(of days: [GuideDay]) -> GuideDay? {
+        guard let first = days.first, let last = days.last else { return nil }
+        return GuideDay(start: first.start, end: last.end)
+    }
+
+    /// 番組の位置を、範囲の始まりから 1 時間ごとの区切りに振り分ける（`hours` 個。各区切りは開始時刻の順）。
+    /// 区切りをまたぐ番組は、かかるすべての区切りに入れる（番組表は 1 時間ずつの行で並べ、行をまたぐ番組は行ごとに同じ欄を描いて切る）
+    public static func hourBuckets(_ placements: [GuidePlacement], hours: Int) -> [[GuidePlacement]] {
+        var buckets = Array(repeating: [GuidePlacement](), count: max(hours, 0))
+        guard hours > 0 else { return buckets }
+        for placement in placements where placement.lengthMinutes > 0 {
+            let first = max(Int((placement.offsetMinutes / 60).rounded(.down)), 0)
+            // 終わりがちょうど区切りなら、その区切りには入れない
+            let last = min(Int(((placement.offsetMinutes + placement.lengthMinutes) / 60).rounded(.up)) - 1, hours - 1)
+            guard first <= last else { continue }
+            for hour in first...last { buckets[hour].append(placement) }
+        }
+        return buckets
+    }
+
+    /// 1 日（または続いた日の全体）にかかる番組の位置（開始時刻の順）。開始の分からない番組は置かない
     public static func placements(_ events: [BroadcastEvent], in day: GuideDay) -> [GuidePlacement] {
         events.compactMap { event in
             guard let start = event.start else { return nil }
@@ -78,9 +99,21 @@ public enum ProgramGuide {
         day.start.formatted(dayFormat)
     }
 
-    /// 1 日の始まりから `hour` 時間目の時刻の「時」（4〜27 ではなく 4〜23・0〜3）
+    /// 1 日の始まりから `hour` 時間目の時刻の「時」（4〜27 ではなく 4〜23・0〜3。日をまたいで続けても同じ）
     public static func hourLabel(_ index: Int) -> String {
         "\((dayStartHour + index) % 24)"
+    }
+
+    private static let rulerDateFormat = Date.FormatStyle(locale: Locale(identifier: "ja_JP"), calendar: Calendar(identifier: .gregorian),
+                                                          timeZone: SITables.japan)
+        .month(.defaultDigits).day(.defaultDigits)
+    private static let rulerWeekdayFormat = Date.FormatStyle(locale: Locale(identifier: "ja_JP"), calendar: Calendar(identifier: .gregorian),
+                                                             timeZone: SITables.japan)
+        .weekday(.abbreviated)
+
+    /// 時刻の列の日の境目に出す日付「11/4」と曜日「(水)」（列が狭いので 2 行に分ける）
+    public static func rulerDayLabel(_ day: GuideDay) -> (date: String, weekday: String) {
+        (day.start.formatted(rulerDateFormat), "(\(day.start.formatted(rulerWeekdayFormat)))")
     }
 
     /// 取得時刻「11/4 20:03」

@@ -99,10 +99,13 @@ enum GuideGenreCategory: UInt8, CaseIterable, Identifiable {
     }
 }
 
-/// ジャンルごとの色。設定で変えた色だけを持ち、無いものは既定の色を使う
+/// ジャンルごとの色と、色を付けるか。設定で変えた色だけを持ち、無いものは既定の色を使う。
+/// 色を付けないジャンルの番組は、番組表でジャンルの無い番組と同じに出す
 struct GuideGenreColors: Codable, Equatable {
     /// 大分類（rawValue）→ sRGB の 16 進
     var custom: [UInt8: String] = [:]
+    /// 色を付けない大分類（rawValue）。既定はすべてに付ける
+    var uncolored: Set<UInt8> = []
 
     func color(for category: GuideGenreCategory) -> Color {
         Color(hex: custom[category.rawValue] ?? category.defaultHex) ?? .gray
@@ -113,7 +116,50 @@ struct GuideGenreColors: Codable, Equatable {
         custom[category.rawValue] = hex == category.defaultHex ? nil : hex
     }
 
+    /// このジャンルの番組に色を付けるか
+    func isColored(_ category: GuideGenreCategory) -> Bool {
+        !uncolored.contains(category.rawValue)
+    }
+
+    mutating func setColored(_ colored: Bool, for category: GuideGenreCategory) {
+        if colored {
+            uncolored.remove(category.rawValue)
+        } else {
+            uncolored.insert(category.rawValue)
+        }
+    }
+
+    /// 色がすべて既定か（「既定の色に戻す」で使う。色を付けるかどうかは含めない）
     var isDefault: Bool { custom.isEmpty }
+}
+
+extension GuideGenreColors {
+    private enum CodingKeys: String, CodingKey {
+        case custom
+        case uncolored
+    }
+
+    /// 前の版（1.1.x）の記録には `uncolored` が無いので、無ければすべてに色を付ける（変えた色は残す）
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        custom = try container.decodeIfPresent([UInt8: String].self, forKey: .custom) ?? [:]
+        uncolored = try container.decodeIfPresent(Set<UInt8>.self, forKey: .uncolored) ?? []
+    }
+}
+
+/// ジャンルの色を前もって作った表。番組の欄ごとに色の文字列を読み直さないよう、番組表を描くたびに 1 回だけ作って配る。
+/// 色を付けないジャンルは表に入れない
+struct GuideGenrePalette: Equatable {
+    private let colors: [GuideGenreCategory: Color]
+
+    init(_ colors: GuideGenreColors) {
+        self.colors = Dictionary(uniqueKeysWithValues: GuideGenreCategory.allCases.filter(colors.isColored).map { ($0, colors.color(for: $0)) })
+    }
+
+    /// 番組のジャンルの色。色を付けないジャンルなら nil（ジャンルの無い番組と同じに出す）
+    func color(for genre: ProgramGenre) -> Color? {
+        colors[GuideGenreCategory(genre)]
+    }
 }
 
 extension Color {

@@ -75,8 +75,8 @@ targets:
         # macOS 27 は icns だけだと 16/32px が灰色の箱に入るので Asset Catalog にする
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SKIP_INSTALL: NO
-        MARKETING_VERSION: "1.1.2"
-        CURRENT_PROJECT_VERSION: "13"
+        MARKETING_VERSION: "1.2.0"
+        CURRENT_PROJECT_VERSION: "15"
 
   # 計測用のコマンド。配布物には含めない
   mirne-probe:
