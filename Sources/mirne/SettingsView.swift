@@ -15,6 +15,51 @@ enum SettingsLayout {
     static let channelDragHandleWidth: CGFloat = 24
     /// 番組表の欄は 13 のジャンルの色が並ぶので、示し方とあわせてスクロールせずに見える高さにする
     static let guidePaneHeight: CGFloat = 820
+    /// 説明の吹き出しの幅
+    static let notePopoverWidth: CGFloat = 380
+}
+
+/// 設定の欄の説明。1 行だけ出し、続きは「?」を押すと吹き出しで出す（1 行に収まる説明は `details` を空にする）
+struct SettingsNote: View {
+    let summary: Text
+    let details: [String]
+    @State private var showsDetails = false
+
+    init(_ summary: Text, details: [String] = []) {
+        self.summary = summary
+        self.details = details
+    }
+
+    init(_ summary: String, details: [String] = []) {
+        self.init(Text(summary), details: details)
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            summary
+            if !details.isEmpty {
+                Button {
+                    showsDetails.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("説明を表示")
+                .popover(isPresented: $showsDetails, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(details, id: \.self) { Text($0) }
+                    }
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: SettingsLayout.notePopoverWidth, alignment: .leading)
+                    .padding()
+                }
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
 }
 
 /// 設定の画面。外部フィルタ・coaxd の場所・チャンネルの編集・デインターレース・字幕の既定。
@@ -33,6 +78,9 @@ struct SettingsView: View {
                 .tabItem { Label("映像", systemImage: "tv") }
             GuideSettingsPane(model: model)
                 .tabItem { Label("番組表", systemImage: "list.bullet.rectangle") }
+#if MIRNE_LAN
+            LANSettingsTab(model: model)
+#endif
         }
         .frame(width: SettingsLayout.width)
     }
@@ -59,14 +107,12 @@ private struct FilterSettingsPane: View {
                         .frame(height: 64)
                 }
             } footer: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("受信した TS を標準入力に渡し、標準出力から返ってきた TS を再生します。コマンドは /bin/sh で実行します。")
-                    Text("コマンドは、標準入力が終わったら（EOF）終了するものにしてください。mirne が止めるときは、起動したプロセスをまとめて止めます。")
-                    Text("「coax pcsc のソケットを渡す」をオンにすると、同梱の coax pcsc を起動し、そのソケットのパスを環境変数 PCSCLITE_CSOCK_NAME で渡します。")
-                    Text("変更は、次に選局したときから使います。")
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                SettingsNote("受信した TS をこのコマンドに通してから再生します。", details: [
+                    "受信した TS を標準入力に渡し、標準出力から返ってきた TS を再生します。コマンドは /bin/sh で実行します。",
+                    "コマンドは、標準入力が終わったら（EOF）終了するものにしてください。mirne が止めるときは、起動したプロセスをまとめて止めます。",
+                    "「coax pcsc のソケットを渡す」をオンにすると、同梱の coax pcsc を起動し、そのソケットのパスを環境変数 PCSCLITE_CSOCK_NAME で渡します。",
+                    "変更は、次に選局したときから使います。",
+                ])
             }
             HStack {
                 Spacer()
@@ -144,9 +190,7 @@ private struct TunerSettingsPane: View {
                 }
                 .disabled(usesBundled)
             } footer: {
-                Text("変更は、mirne を起動し直したときから使います。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsNote("変更は、mirne を起動し直したときから使います。")
             }
             Section {
                 Toggle("起動したときに前回の局を選局する", isOn: $model.autoTuneLastChannel)
@@ -200,11 +244,10 @@ private struct ChannelSettingsPane: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 HStack {
-                    Text("右端の \(Image(systemName: "line.3.horizontal")) をドラッグすると並べ替えられます。隠した局はサイドバー・↑↓・数字キーで選べなくなります。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        // 1 行に収まらないので折り返す（切れて末尾が「…」になっていた）
-                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsNote(Text("右端の \(Image(systemName: "line.3.horizontal")) をドラッグすると並べ替えられます。"), details: [
+                        "右端の印をドラッグすると並べ替えられます。",
+                        "隠した局はサイドバー・↑↓・数字キーで選べなくなります。",
+                    ])
                     Spacer()
                     Button("元に戻す") { model.channelEdits = ChannelEdits() }
                         .disabled(model.channelEdits.isEmpty)
@@ -353,9 +396,10 @@ private struct GuideSettingsPane: View {
                     }
                 }
             } footer: {
-                Text("番組のジャンルは、放送の番組情報から集めます。まだ集め直していない番組には色が付きません。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsNote("番組のジャンルは、放送の番組情報から集めます。", details: [
+                    "番組のジャンルは、放送の番組情報から集めます。",
+                    "まだ集め直していない番組には色が付きません。",
+                ])
             }
             Section {
                 ForEach(GuideGenreCategory.allCases) { category in
@@ -377,9 +421,7 @@ private struct GuideSettingsPane: View {
             } header: {
                 Text("ジャンルの色")
             } footer: {
-                Text("チェックを外したジャンルの番組には色を付けず、ジャンルの無い番組と同じに出します。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsNote("チェックを外したジャンルの番組には色を付けず、ジャンルの無い番組と同じに出します。")
             }
             .disabled(model.guideGenreStyle == .none)
         }

@@ -152,6 +152,21 @@ final class ViewerModel {
     @ObservationIgnored private var resumeAfterGuideSheet: ChannelList.Entry?
     /// 番組表を重ねて出したので巡回しているか
     @ObservationIgnored private var patrolsForGuideSheet = false
+    /// 視聴ウィンドウの外の出力（ほかの端末への出力など）が見ているか。見ている間は、窓を閉じても・番組表を重ねても
+    /// 受信を止めず、Mac の音を消す（自分でミュートしていたら、見終わっても戻さない）。見終わったら、そのときの窓の様子に合わせる
+    var isWatchedElsewhere = false {
+        didSet {
+            guard isWatchedElsewhere != oldValue else { return }
+            watchedElsewhereChanged()
+        }
+    }
+    /// 外の出力が見始めたので音を消したか（見終わったら戻す）
+    @ObservationIgnored private var mutedForElsewhere = false
+    /// 外の出力が求めた局（巡回をやめて選局するときは、前に見ていた局よりこちらを選ぶ）
+    @ObservationIgnored private var requestedElsewhere: ChannelList.Entry?
+#if MIRNE_LAN
+    @ObservationIgnored private(set) var lan: LANController?
+#endif
 
     private static let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "tuner")
 
@@ -209,6 +224,9 @@ final class ViewerModel {
             self.patrol = patrol
         }
         watchViewerWindow()
+#if MIRNE_LAN
+        lan = LANController(model: self)
+#endif
     }
 
     // MARK: - 番組表の巡回
@@ -226,6 +244,10 @@ final class ViewerModel {
         resumeAfterReopen = patrolsForGuideSheet ? resumeAfterGuideSheet : current
         patrolsForGuideSheet = false
         resumeAfterGuideSheet = nil
+        guard !isWatchedElsewhere else {
+            Self.logger.notice("視聴ウィンドウを閉じたが、外の出力が見ているので受信を続ける")
+            return
+        }
         Self.logger.notice("視聴ウィンドウを閉じたので受信を止める")
         reception.stop()
         Task { await playback.stop() }
@@ -257,6 +279,10 @@ final class ViewerModel {
     /// ほかの局を集める間は見ている局の映像と音が止まる。集まった分はその場で番組表に出る（`patrolRevision`）
     private func guideSheetOpened() {
         guard let patrol, !isScanning, !patrol.isRunning else { return }
+        guard !isWatchedElsewhere else {
+            Self.logger.notice("番組表を重ねて出したが、外の出力が見ているので受信を続ける（巡回しない）")
+            return
+        }
         resumeAfterGuideSheet = current
         patrolsForGuideSheet = true
         Self.logger.notice("番組表を重ねて出したので受信を止めて巡回する")
@@ -283,6 +309,65 @@ final class ViewerModel {
             await patrol?.stop()
             if let entry, reception.tuner.state == .idle {
                 Self.logger.notice("番組表を閉じたので選局し直す（\(entry.service.name, privacy: .public)）")
+                select(entry)
+            }
+        }
+    }
+
+    // MARK: - 外の出力
+
+    private func watchedElsewhereChanged() {
+        if isWatchedElsewhere {
+            Self.logger.notice("外の出力が見始めた")
+            if !playback.isMuted {
+                playback.isMuted = true
+                mutedForElsewhere = true
+            }
+            resumeForElsewhere()
+        } else {
+            Self.logger.notice("外の出力が見終わった")
+            if mutedForElsewhere, playback.isMuted { playback.isMuted = false }
+            mutedForElsewhere = false
+            // 見ている間は止めなかった分を、いまの窓の様子に合わせて行う
+            if windowController.isClosed {
+                viewerWindowClosed()
+            } else if isGuideSheetPresented {
+                guideSheetOpened()
+            }
+        }
+    }
+
+    /// 外の出力が局を求めた（後から求めた方が勝つ。Mac の画面もその局に替わる）。巡回していれば巡回をやめてから選局する
+    func selectForElsewhere(_ entry: ChannelList.Entry) {
+        guard !isScanning else { return }
+        Self.logger.notice("外の出力が局を求めた（\(entry.service.name, privacy: .public)）")
+        let patrolling = patrol?.isRunning == true || patrolStart != nil || patrolsForGuideSheet
+        guard patrolling else {
+            select(entry)
+            return
+        }
+        requestedElsewhere = entry
+        resumeForElsewhere()
+    }
+
+    /// 巡回している（窓を閉じている・番組表を重ねている）なら巡回をやめ、前に見ていた局（外の出力が求めた局があればそれ）を選局する
+    private func resumeForElsewhere() {
+        let closed = windowController.isClosed
+        let requested = requestedElsewhere
+        requestedElsewhere = nil
+        let entry = requested ?? (patrolsForGuideSheet ? resumeAfterGuideSheet : nil) ?? (closed ? resumeAfterReopen : nil) ?? current ?? lastEntry
+        if patrolsForGuideSheet {
+            // 番組表は重ねたまま。閉じたときに選局し直さないよう、巡回の印を下ろす
+            patrolsForGuideSheet = false
+            resumeAfterGuideSheet = nil
+        }
+        patrolStart?.cancel()
+        patrolStart = nil
+        Task {
+            await patrol?.stop()
+            // 求められた局は、受信していても替える。前に見ていた局へ戻すのは、受信していないときだけ
+            if let entry, requested != nil || reception.tuner.state == .idle {
+                Self.logger.notice("外の出力が見ているので選局する（\(entry.service.name, privacy: .public)）")
                 select(entry)
             }
         }
@@ -377,7 +462,7 @@ final class ViewerModel {
     /// 覚えると、復帰したときに閉じた窓のまま選局し直して隠れたまま再生し、チューナーがふさがって、窓を開き直したときの選局
     /// （チューナーが空いているときだけ）が走らず、映像が戻らなかった
     private func willSleep() {
-        let viewing = !windowController.isClosed && !patrolsForGuideSheet
+        let viewing = (!windowController.isClosed && !patrolsForGuideSheet) || isWatchedElsewhere
         resumeAfterWake = viewing ? current : nil
         Self.logger.notice("スリープの前に受信を止める（\(viewing ? (self.current?.service.name ?? "-") : "視聴していない", privacy: .public)）")
         reception.stop()
@@ -498,6 +583,8 @@ final class ViewerModel {
 
     func toggleMute() {
         playback.isMuted.toggle()
+        // 自分で切り替えたら、外の出力が見終わっても戻さない
+        mutedForElsewhere = false
         showOverlay()
     }
 

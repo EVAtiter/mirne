@@ -45,6 +45,9 @@ final class PlaybackLab {
 
     private var playback: Task<Void, Never>?
     private var monitor: Task<Void, Never>?
+#if MIRNE_LAN
+    @ObservationIgnored private var lanStreamer: LANStreamer?
+#endif
     /// チューナーから受信するとき（MIRNE_LAB_FREQ）だけ使う
     private var reception: Reception?
     private var live: LivePlayback?
@@ -59,6 +62,9 @@ final class PlaybackLab {
         renderer?.mediaTimeAtHost = { engine.mediaTime(atHost: $0) }
         renderer?.clockEpoch = { engine.clockEpoch }
         captions = CaptionOverlayModel(engine: engine, renderer: renderer, isEnabled: true)
+#if MIRNE_LAN
+        lanStreamer = LANStreamer.startForLab(engine: engine)
+#endif
         startAutomaticRunIfRequested()
     }
 

@@ -109,6 +109,7 @@ public final class PlayerEngine: @unchecked Sendable {
     private var publishedAudio = AudioStatus()
     private var audioStatusHandler: (@Sendable (AudioStatus) -> Void)?
     private var enqueuedAudioHandler: (@Sendable (CMSampleBuffer) -> Void)?
+    private var decodedVideoHandler: (@Sendable (DecodedFrame) -> Void)?
     private var stats = PlaybackStatistics()
     private var epoch = 0
     private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "player")
@@ -117,7 +118,10 @@ public final class PlayerEngine: @unchecked Sendable {
 
     public init() {
         synchronizer.addRenderer(audioRenderer)
-        videoDecoder = MPEG2VideoDecoder { [frames] frame in frames.push(frame) }
+        videoDecoder = MPEG2VideoDecoder { [weak self, frames] frame in
+            frames.push(frame)
+            self?.onVideoDecoded?(frame)
+        }
     }
 
     /// 時計の今の時刻（90 kHz）。再生前は nil。描いた絵が画面に出るまでの遅れは描く側が足す
@@ -186,11 +190,17 @@ public final class PlayerEngine: @unchecked Sendable {
         set { lock.withLock { audioStatusHandler = newValue } }
     }
 
-    /// 出力へ渡した音声（復号して二重音声を振り分けた後の PCM）を見る（検証用。feed を呼んでいるタスクから呼ばれる）。
-    /// 二重音声の切替が、出力に渡す音声のどこから効いたかを測るのに使う
+    /// 出力へ渡した音声（復号して二重音声を振り分けた後の PCM）を外へ渡す（feed を呼んでいるタスクから呼ばれる）。
+    /// 二重音声の切替が、出力に渡す音声のどこから効いたかを測るのにも使う
     public var onAudioEnqueued: (@Sendable (CMSampleBuffer) -> Void)? {
         get { lock.withLock { enqueuedAudioHandler } }
         set { lock.withLock { enqueuedAudioHandler = newValue } }
+    }
+
+    /// 復号できた映像のフレームごとに呼ぶ（復号のスレッドから。復号の順なので、表示の順とは限らない）
+    public var onVideoDecoded: (@Sendable (DecodedFrame) -> Void)? {
+        get { lock.withLock { decodedVideoHandler } }
+        set { lock.withLock { decodedVideoHandler = newValue } }
     }
 
     /// いまの音声の状態
