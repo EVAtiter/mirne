@@ -61,6 +61,10 @@ public enum DualMonoChannel: Sendable, Equatable, CaseIterable {
 /// このフレームを 1 つも復号できない（実測。235 フレームすべて失敗）。そこで、SCE を前方の 2 チャンネルに
 /// 割り当てる PCE を入れた設定（AudioSpecificConfig）を ESDS に包んで magic cookie として渡す
 /// （AudioSpecificConfig をそのまま渡すと受け付けない）。復号すると主が左、副が右の 2 チャンネルになる。
+///
+/// 二重音声には、channel_configuration 0 の形もある（nasne の元画質の録画で実測）。ときどきフレームの頭に
+/// 前方の SCE 2 つを指定する PCE が入り（約 25 フレームに 1 回）、ほかのフレームは SCE から始まる。
+/// これを普通のステレオとして渡すと 1 フレームも復号できず、音が出なかった。同じ設定で二重音声として復号する。
 final class AACDecoder {
     private var converter: AudioConverterRef?
     private var current: ADTSHeader?
@@ -90,6 +94,8 @@ final class AACDecoder {
     private var carried = Data()
     /// 次のフレームの時刻の見込み（90 kHz）。PES の PTS が当たらないフレームに使う
     private var nextPTS: Int64?
+    /// channel_configuration 0 で、最後に読んだ PCE が二重音声（前方に SCE 2 つだけ）だったか。PCE をまだ読んでいなければ nil
+    private var programConfigDualMono: Bool?
 
     deinit {
         if let converter { AudioConverterDispose(converter) }
@@ -139,7 +145,7 @@ final class AACDecoder {
                 if offset < carriedCount { framesAcrossPES += 1 }
                 nextPTS = framePTS + frameDuration
                 let raw = UnsafeRawBufferPointer(rebasing: buffer[(offset + header.headerLength)..<(offset + header.frameLength)])
-                let dualMonoFrame = header.channelConfiguration == 2 && AACRawDataBlock.startsWithSingleChannelElement(raw)
+                let dualMonoFrame = isDualMonoFrame(raw, header: header)
                 if current.map({ !header.sameFormat(as: $0) }) ?? true || dualMonoFrame != isDualMono {
                     rebuild(for: header, dualMono: dualMonoFrame)
                 }
@@ -172,6 +178,23 @@ final class AACDecoder {
     func reset() {
         if let converter { AudioConverterReset(converter) }
         discardCarried()
+        programConfigDualMono = nil
+    }
+
+    /// このフレームが二重音声か。channel_configuration 2 なら頭が SCE か。0 なら PCE の指定に従い、
+    /// PCE の無いフレームは前の PCE の指定のまま（PCE をまだ読んでいなければ、頭が SCE なら二重音声と見なす）
+    private func isDualMonoFrame(_ raw: UnsafeRawBufferPointer, header: ADTSHeader) -> Bool {
+        switch header.channelConfiguration {
+        case 2:
+            return AACRawDataBlock.startsWithSingleChannelElement(raw)
+        case 0:
+            if current.map({ !header.sameFormat(as: $0) }) ?? false { programConfigDualMono = nil }
+            guard let leading = AACLeadingElements.read(raw) else { return programConfigDualMono ?? false }
+            if let config = leading.programConfig { programConfigDualMono = config.isDualMono }
+            return programConfigDualMono ?? (leading.kinds.first == .singleChannel)
+        default:
+            return false
+        }
     }
 
     /// `offset` に次のフレームの同期語があるか（バッファの終わりなら、まだ分からないので認める）。偽の同期語を見分ける
@@ -347,6 +370,123 @@ enum AACRawDataBlock {
             position += count * 8
         }
         return false
+    }
+}
+
+/// AAC の生データブロックの頭の要素（SCE・CPE より前に置かれる PCE・FIL・DSE）を読む。
+///
+/// SCE・CPE の中身はハフマン符号なので、ここでは読み進められない。そこで、最初の音の要素に当たるまでの並びと、
+/// 途中の PCE（program_config_element。channel_configuration 0 のときにチャンネルの構成を伝える）の中身を返す。
+enum AACLeadingElements {
+    /// 要素の種類（ISO/IEC 14496-3 の id_syn_ele）
+    enum Kind: Int, Sendable {
+        case singleChannel = 0, channelPair, couplingChannel, lowFrequency, dataStream, programConfig, fill, end
+    }
+
+    /// PCE の中身（チャンネルの並びに要るところだけ）
+    struct ProgramConfig: Equatable, Sendable {
+        /// 各位置の要素。`isPair` が真なら CPE、偽なら SCE。`tag` は element_instance_tag
+        struct Element: Equatable, Sendable {
+            let isPair: Bool
+            let tag: Int
+        }
+        let tag: Int
+        let objectType: Int
+        let sampleRateIndex: Int
+        let front: [Element]
+        let side: [Element]
+        let back: [Element]
+        let lowFrequencyTags: [Int]
+
+        /// 二重音声の構成か（前方に SCE が 2 つだけ。横・後・LFE なし）
+        var isDualMono: Bool {
+            front.count == 2 && front.allSatisfy { !$0.isPair } && side.isEmpty && back.isEmpty && lowFrequencyTags.isEmpty
+        }
+    }
+
+    /// 最初の SCE・CPE・CCE・LFE（または END）までの要素の種類と、途中の PCE。読めなければ nil
+    static func read(_ raw: UnsafeRawBufferPointer) -> (kinds: [Kind], programConfig: ProgramConfig?)? {
+        var reader = BitReader(raw)
+        var kinds: [Kind] = []
+        var programConfig: ProgramConfig?
+        while let id = reader.read(3), let kind = Kind(rawValue: id) {
+            kinds.append(kind)
+            switch kind {
+            case .singleChannel, .channelPair, .couplingChannel, .lowFrequency, .end:
+                return (kinds, programConfig)
+            case .fill:
+                guard var count = reader.read(4) else { return nil }
+                if count == 15 {
+                    guard let escape = reader.read(8) else { return nil }
+                    count += escape - 1
+                }
+                reader.skip(count * 8)
+            case .dataStream:
+                guard reader.read(4) != nil, let align = reader.read(1), var count = reader.read(8) else { return nil }
+                if count == 255 {
+                    guard let escape = reader.read(8) else { return nil }
+                    count += escape
+                }
+                if align == 1 { reader.alignToByte() }
+                reader.skip(count * 8)
+            case .programConfig:
+                guard let config = readProgramConfig(&reader) else { return nil }
+                programConfig = config
+            }
+            guard !reader.exhausted else { return nil }
+        }
+        return nil
+    }
+
+    private static func readProgramConfig(_ reader: inout BitReader) -> ProgramConfig? {
+        guard let tag = reader.read(4), let objectType = reader.read(2), let rateIndex = reader.read(4),
+              let frontCount = reader.read(4), let sideCount = reader.read(4), let backCount = reader.read(4),
+              let lfeCount = reader.read(2), let assocCount = reader.read(3), let ccCount = reader.read(4) else { return nil }
+        // ミックスダウンの指定（mono 4 ビット・stereo 4 ビット・matrix 2+1 ビット）
+        for extra in [4, 4, 3] {
+            guard let present = reader.read(1) else { return nil }
+            if present == 1 { reader.skip(extra) }
+        }
+        func elements(_ count: Int) -> [ProgramConfig.Element]? {
+            var list: [ProgramConfig.Element] = []
+            for _ in 0..<count {
+                guard let pair = reader.read(1), let tag = reader.read(4) else { return nil }
+                list.append(.init(isPair: pair == 1, tag: tag))
+            }
+            return list
+        }
+        guard let front = elements(frontCount), let side = elements(sideCount), let back = elements(backCount) else { return nil }
+        var lfe: [Int] = []
+        for _ in 0..<lfeCount {
+            guard let tag = reader.read(4) else { return nil }
+            lfe.append(tag)
+        }
+        reader.skip(assocCount * 4 + ccCount * 5)
+        reader.alignToByte()
+        guard let commentBytes = reader.read(8) else { return nil }
+        reader.skip(commentBytes * 8)
+        guard !reader.exhausted else { return nil }
+        return ProgramConfig(tag: tag, objectType: objectType + 1, sampleRateIndex: rateIndex,
+                             front: front, side: side, back: back, lowFrequencyTags: lfe)
+    }
+
+    /// ビットを先頭から読む
+    private struct BitReader {
+        let raw: UnsafeRawBufferPointer
+        var position = 0
+        init(_ raw: UnsafeRawBufferPointer) { self.raw = raw }
+        var exhausted: Bool { position > raw.count * 8 }
+        mutating func read(_ count: Int) -> Int? {
+            guard position + count <= raw.count * 8 else { return nil }
+            var value = 0
+            for _ in 0..<count {
+                value = value << 1 | Int(raw[position / 8] >> (7 - position % 8) & 1)
+                position += 1
+            }
+            return value
+        }
+        mutating func skip(_ count: Int) { position += count }
+        mutating func alignToByte() { position = (position + 7) / 8 * 8 }
     }
 }
 

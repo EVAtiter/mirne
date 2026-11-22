@@ -9,50 +9,30 @@ enum RemoteControlKeys {
     ]
 }
 
-/// 「表示」「チャンネル」「音声」のメニューとキーボード操作
+/// メニューとキーボード操作。構成はファイル・表示・コントロール・ウインドウ・ヘルプ（2026-11-22 に、視聴の操作を
+/// 「チャンネル」「音声」から「コントロール」へまとめ、窓の操作をウインドウへ、字幕をコントロールへ移した）
+/// - 表示：映像に重ねる表示（全画面・受信状態）と、番組表を開く
+/// - コントロール：視聴の操作（チャンネル・音声・字幕・音量）
+/// - ウインドウ：窓の大きさと並び（標準の大きさに戻す・常に最前面）
+/// - ファイル：受信の設定を作り直す操作（チャンネルスキャン）
+/// - ヘルプ：ヘルプの本は無いので、項目を外して macOS が付ける検索の欄だけを残す
 struct ViewerCommands: Commands {
     let model: ViewerModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         SidebarCommands()
+        CommandGroup(after: .newItem) {
+            Button("チャンネルスキャン…") { model.startScan() }
+                .disabled(model.isScanning)
+        }
         CommandGroup(after: .sidebar) {
             Button("全画面表示") {
                 NSApp.keyWindow?.toggleFullScreen(nil)
             }
             .keyboardShortcut("f", modifiers: [])
-            Toggle("常に最前面", isOn: Binding(get: { model.windowController.isAlwaysOnTop },
-                                             set: { model.windowController.isAlwaysOnTop = $0 }))
-                .keyboardShortcut("t", modifiers: [])
-                .disabled(model.windowController.isFullScreen)
-            Button("ウィンドウを標準の大きさに戻す") { model.windowController.resetSize() }
-                .keyboardShortcut("0", modifiers: .command)
-                .disabled(!model.windowController.canResetSize)
-            Divider()
             Toggle("受信状態", isOn: Binding(get: { model.showsSignal }, set: { model.showsSignal = $0 }))
                 .keyboardShortcut("i", modifiers: [])
-            Toggle("字幕", isOn: Binding(get: { model.captions.isEnabled }, set: { _ in model.toggleCaptions() }))
-                .keyboardShortcut("c", modifiers: [])
-        }
-        CommandMenu("チャンネル") {
-            ForEach(RemoteControlKeys.keys, id: \.number) { item in
-                Button(title(forKey: item.number)) {
-                    model.select(remoteControlKey: item.number)
-                }
-                .keyboardShortcut(item.key, modifiers: [])
-                .disabled(!model.lineup.contains { $0.remoteControlKey == item.number })
-            }
-            Divider()
-            Button("前のチャンネル") { model.step(-1) }
-                .keyboardShortcut(.upArrow, modifiers: [])
-            Button("次のチャンネル") { model.step(1) }
-                .keyboardShortcut(.downArrow, modifiers: [])
-            Menu("サブチャンネル") {
-                ForEach(model.subServices) { entry in
-                    Button("\(entry.branch). \(entry.service.name)") { model.select(entry) }
-                }
-            }
-            .disabled(model.subServices.count < 2)
             Divider()
             Button("番組表") { openWindow(id: WindowID.guide) }
                 .keyboardShortcut("g", modifiers: [])
@@ -60,17 +40,28 @@ struct ViewerCommands: Commands {
             Button("番組表を重ねて表示") { model.isGuideSheetPresented = true }
                 .keyboardShortcut("g", modifiers: .shift)
                 .disabled(model.lineup.isEmpty || model.isScanning)
-            Divider()
-            Button("チャンネルスキャン…") { model.startScan() }
-                .disabled(model.isScanning)
         }
-        CommandMenu("音声") {
-            Button(model.playback.isMuted ? "ミュートを解除" : "ミュート") { model.toggleMute() }
-                .keyboardShortcut("m", modifiers: [])
-            Button("音量を上げる") { model.changeVolume(by: VolumeStep.increment) }
-                .keyboardShortcut(.upArrow, modifiers: .command)
-            Button("音量を下げる") { model.changeVolume(by: -VolumeStep.increment) }
-                .keyboardShortcut(.downArrow, modifiers: .command)
+        CommandMenu("コントロール") {
+            // ↑ で次、↓ で前（テレビのリモコンのチャンネルの ▲ ▼ と同じ向き。2026-11-22 に逆から直した）
+            Button("次のチャンネル") { model.step(1) }
+                .keyboardShortcut(.upArrow, modifiers: [])
+            Button("前のチャンネル") { model.step(-1) }
+                .keyboardShortcut(.downArrow, modifiers: [])
+            Menu("局を選ぶ") {
+                ForEach(RemoteControlKeys.keys, id: \.number) { item in
+                    Button(title(forKey: item.number)) {
+                        model.select(remoteControlKey: item.number)
+                    }
+                    .keyboardShortcut(item.key, modifiers: [])
+                    .disabled(!model.lineup.contains { $0.remoteControlKey == item.number })
+                }
+            }
+            Menu("サブチャンネル") {
+                ForEach(model.subServices) { entry in
+                    Button("\(entry.branch). \(entry.service.name)") { model.select(entry) }
+                }
+            }
+            .disabled(model.subServices.count < 2)
             Divider()
             Button("音声を切り替える") { model.cycleAudio() }
                 .keyboardShortcut("a", modifiers: [])
@@ -86,7 +77,26 @@ struct ViewerCommands: Commands {
                     Text(DualMonoLabel.text(channel)).tag(channel)
                 }
             }
+            Toggle("字幕", isOn: Binding(get: { model.captions.isEnabled }, set: { _ in model.toggleCaptions() }))
+                .keyboardShortcut("c", modifiers: [])
+            Divider()
+            Button(model.playback.isMuted ? "ミュートを解除" : "ミュート") { model.toggleMute() }
+                .keyboardShortcut("m", modifiers: [])
+            Button("音量を上げる") { model.changeVolume(by: VolumeStep.increment) }
+                .keyboardShortcut(.upArrow, modifiers: .command)
+            Button("音量を下げる") { model.changeVolume(by: -VolumeStep.increment) }
+                .keyboardShortcut(.downArrow, modifiers: .command)
         }
+        CommandGroup(after: .windowSize) {
+            Button("標準の大きさに戻す") { model.windowController.resetSize() }
+                .keyboardShortcut("0", modifiers: .command)
+                .disabled(!model.windowController.canResetSize)
+            Toggle("常に最前面", isOn: Binding(get: { model.windowController.isAlwaysOnTop },
+                                             set: { model.windowController.isAlwaysOnTop = $0 }))
+                .keyboardShortcut("t", modifiers: [])
+                .disabled(model.windowController.isFullScreen)
+        }
+        CommandGroup(replacing: .help) {}
     }
 
     private func title(forKey number: Int) -> String {

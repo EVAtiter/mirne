@@ -81,7 +81,7 @@ scripts/make-fixtures.sh   # create test TS files in build/fixtures/
 
 ## Usage
 
-1. Connect the tuner, launch mirne and choose 「チャンネルスキャン…」 (Channel Scan) from the 「チャンネル」 (Channel) menu to find stations
+1. Connect the tuner, launch mirne and choose 「チャンネルスキャン…」 (Channel Scan) from the 「ファイル」 (File) menu to find stations
 2. In Settings (⌘,), on the 「外部フィルタ」 (External Filter) tab, specify the command that the received TS is passed through
    - The command must read a TS from standard input and write a TS to standard output
    - **It must exit when standard input ends (EOF).** mirne restarts the command every time it tunes
@@ -107,7 +107,7 @@ In addition to step 2 above, mirne handles the external filter as follows.
 | Key | Action |
 | --- | --- |
 | 1–9, 0, -, ^ | Choose the station on remote control key 1–12 (0 is 10, - is 11, ^ is 12) |
-| ↑ / ↓ | Previous / next station |
+| ↑ / ↓ | Next / previous station |
 | G / Shift+G | Program guide / program guide over the viewer window |
 | F | Full screen |
 | T | Always on Top |

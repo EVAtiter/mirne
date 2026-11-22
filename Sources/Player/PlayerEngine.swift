@@ -275,31 +275,18 @@ public final class PlayerEngine: @unchecked Sendable {
 
     /// 再生を止めて、すべてを捨てる
     public func stop() {
-        advanceEpoch()
-        synchronizer.setRate(0, time: .zero)
-        audioRenderer.flush()
-        // 復号中のフレームを出し切らせてから空にする（逆だと、空にした後に前の時刻のフレームが入る）
-        videoDecoder.reset()
-        frames.removeAll()
-        audioDecoder.reset()
+        clearTimeline()
+        // 時計の張り直しでは持ち越すもの（番組の表・PCR・選んだ音声と字幕の ES）も捨てる
         demuxer.reset()
-        videoClock.reset()
-        audioClock.reset()
         pcrClock.reset()
-        resetCaptions()
-        pendingVideo.removeAll()
         activeAudio = nil
         captionPID = nil
         audioLayout = nil
         lock.lock()
         preferredAudio = nil
-        playing = false
         resyncedForAudio = false
         lastPCR = nil
-        lastAudioPTS = nil
-        firstAudioPTS = nil
         firstData = nil
-        videoReadyAt = nil
         lock.unlock()
         publishAudioStatus()
     }
@@ -364,6 +351,13 @@ public final class PlayerEngine: @unchecked Sendable {
     /// 時計の不連続: 再生を止め、復号器と出力を空にして、次のフレームから始め直す
     private func restartClock(reason: String) {
         logger.info("時計を張り直す: \(reason, privacy: .public)")
+        clearTimeline()
+        lock.withLock { stats.discontinuities += 1 }
+    }
+
+    /// 時計を止め、復号器・出力・時刻に並べたもの（映像・音声・字幕）を空にして、再生前に戻す。
+    /// `stop` と `restartClock` の共通の手順（2026-11-21 にまとめた。前は両方に同じ並びを書いていた）
+    private func clearTimeline() {
         advanceEpoch()
         synchronizer.setRate(0, time: .zero)
         audioRenderer.flush()
@@ -380,7 +374,6 @@ public final class PlayerEngine: @unchecked Sendable {
         lastAudioPTS = nil
         firstAudioPTS = nil
         videoReadyAt = nil
-        stats.discontinuities += 1
         lock.unlock()
     }
 
@@ -393,10 +386,9 @@ public final class PlayerEngine: @unchecked Sendable {
             lock.unlock()
             // 圧縮のまま溜め、時計が近づいてから復号する（decodePendingVideo）
             let unwrapped = videoClock.unwrap(pts)
-            let scanned = MPEG2Parser.scan(packet.payload)
             pendingVideo.append(PendingVideo(payload: packet.payload, pts: unwrapped,
                                              dts: packet.dts.map { videoClock.unwrap($0) } ?? unwrapped, damaged: packet.damaged,
-                                             isRandomAccess: scanned.sequence != nil && scanned.picture?.codingType == .intra))
+                                             isRandomAccess: MPEG2Parser.isRandomAccess(packet.payload)))
             trimPendingVideo()
         } else if packet.pid == captionPID {
             handleCaption(packet)

@@ -17,8 +17,8 @@ struct ViewerView: View {
         } detail: {
             VideoArea(model: model)
                 .toolbar {
-                    // タイトルの右端から番組表を重ねて出す（「チャンネル」メニューの「番組表を重ねて表示」と同じ）。
-                    // Shift を押しながらなら別のウインドウで開く（「チャンネル」メニューの「番組表」と同じ）
+                    // タイトルの右端から番組表を重ねて出す（「表示」メニューの「番組表を重ねて表示」と同じ）。
+                    // Shift を押しながらなら別のウインドウで開く（「表示」メニューの「番組表」と同じ）
                     ToolbarItem(placement: .primaryAction) {
                         Button {
                             if NSEvent.modifierFlags.contains(.shift) {

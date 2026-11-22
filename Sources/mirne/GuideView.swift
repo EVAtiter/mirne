@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// ウィンドウの ID（`openWindow` で開く）
@@ -217,8 +218,9 @@ struct GuideView: View {
         .onScrollGeometryChange(for: GuideScrollGeometry.self) {
             GuideScrollGeometry(offset: CGPoint(x: $0.contentOffset.x + $0.contentInsets.leading, y: $0.contentOffset.y + $0.contentInsets.top),
                                 viewportHeight: $0.containerSize.height)
-        } action: { _, geometry in
+        } action: { old, geometry in
             scroll.update(geometry, dayCount: table.days.count, hourCount: table.hours.count)
+            if old.offset != geometry.offset { hover.scrolled() }
         }
         .overlay(alignment: .topLeading) {
             FloatingRuler(scroll: scroll, top: headerHeight) { rulerContent(table, now: now) }
@@ -318,8 +320,10 @@ struct GuideView: View {
             EPGStore.ServiceKey(networkID: $0.channel.originalNetworkID, transportStreamID: $0.channel.transportStreamID, serviceID: $0.service.serviceID)
         }
         // 範囲の終わりは持っている番組で決まるので、始まりから先をすべて読む（番組表は放送から 8 日分ほどしか無い）
-        let schedules = await model.epgStore?.schedules(of: services, overlapping: start..<Date.distantFuture)
-            ?? lineup.map { _ in EPGStore.ServiceSchedule(coverage: nil, events: []) }
+        // 番組名の番組マークのうち、Mac のフォントに字形の無い囲み文字（🅍 など）は角括弧にする（そのままだと「?」で出る）
+        let schedules = (await model.epgStore?.schedules(of: services, overlapping: start..<Date.distantFuture)
+            ?? lineup.map { _ in EPGStore.ServiceSchedule(coverage: nil, events: []) })
+            .map { $0.normalizingBroadcastMarks() }
         let built = await Task.detached(priority: .userInitiated) {
             GuideTable.build(start: start, lineup: lineup, schedules: schedules)
         }.value
@@ -493,7 +497,7 @@ private struct GuideRows: View {
         .onContinuousHover { phase in
             switch phase {
             case .active(let location): hovered(at: location)
-            case .ended: hover.reset()
+            case .ended: hover.mouseLeft()
             }
         }
     }
@@ -560,8 +564,31 @@ private final class GuideHoverState {
         detail = nil
     }
 
+    /// マウスが番組表の外へ出た。待っている吹き出しは取り消すが、出ている吹き出しと、マウスの下にあった番組は残す。
+    ///
+    /// 吹き出しは別の窓なので、マウスの位置に重なって出ると、マウスが吹き出しの上へ移り、番組表の外へ出たことになる。
+    /// ここで `reset()` していたので、閉じる → また番組の上 → 1 秒後に出す → 重なって閉じる、を繰り返して点滅した。
+    /// 出している吹き出しは、別の番組へ移るか外を押すと閉じる
+    func mouseLeft() {
+        task?.cancel()
+        if detail == nil {
+            hovered = nil
+            activeRow = nil
+        }
+    }
+
+    /// 番組表が送られた：吹き出しを閉じ、待っている吹き出しも取り消す。マウスの下の番組も忘れ、止まってから番組の上に置き直すと出す。
+    ///
+    /// 吹き出しは番組表とは別の小さな窓なので、出したまま送ると、マウスの下に来た吹き出しがスクロールの操作を受けてしまい、
+    /// 番組表がそこで止まった（2026-11-21）
+    func scrolled() {
+        guard detail != nil || task != nil || hovered != nil else { return }
+        reset()
+    }
+
     func reset() {
         task?.cancel()
+        task = nil
         hovered = nil
         activeRow = nil
         if detail != nil { detail = nil }
@@ -659,6 +686,7 @@ private struct GuidePopoverHost: View {
             .popover(item: Binding(get: { detail }, set: { if $0 == nil, detail != nil { hover.dismiss() } }),
                      attachmentAnchor: .rect(.rect(anchorRect(detail))), arrowEdge: .trailing) { detail in
                 ProgramDetail(event: detail.placement.event)
+                    .popoverScrollWatcher { hover.scrolled() }
             }
     }
 
@@ -818,5 +846,58 @@ private struct GuideRule: View {
         Rectangle()
             .fill(Color(nsColor: .separatorColor))
             .frame(width: axis == .vertical ? 1 : nil, height: axis == .horizontal ? 1 : nil)
+    }
+}
+
+extension View {
+    /// 吹き出しの窓がスクロールの操作を受けたら知らせる
+    func popoverScrollWatcher(_ onScroll: @escaping () -> Void) -> some View {
+        background(PopoverScrollWatcher(onScroll: onScroll))
+    }
+}
+
+/// 吹き出しの窓がスクロールの操作を受けたら知らせる。
+///
+/// 吹き出しは番組表とは別の小さな窓なので、マウスが吹き出しの上にあるとスクロールの操作は吹き出しに届き、番組表は動かない
+/// （番組表が送られたら閉じるだけでは、吹き出しの上で始めたスワイプで閉じなかった。2026-11-21）。
+/// 受けたら吹き出しを閉じ、続きの操作が下の番組表に届くようにする。受けた 1 回は吹き出しで捨てる
+private struct PopoverScrollWatcher: NSViewRepresentable {
+    let onScroll: () -> Void
+
+    func makeNSView(context: Context) -> WatcherView {
+        let view = WatcherView()
+        view.onScroll = onScroll
+        return view
+    }
+
+    func updateNSView(_ view: WatcherView, context: Context) {
+        view.onScroll = onScroll
+    }
+
+    static func dismantleNSView(_ view: WatcherView, coordinator: ()) {
+        view.stopWatching()
+    }
+
+    final class WatcherView: NSView {
+        var onScroll: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopWatching()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else { return event }
+                self.onScroll?()
+                return nil
+            }
+        }
+
+        func stopWatching() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }

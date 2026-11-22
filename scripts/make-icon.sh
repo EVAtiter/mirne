@@ -6,8 +6,9 @@
 #
 # macOS 27 は icns だけ（CFBundleIconFile のみ）のアプリを 16/32px の表示で灰色の角丸の箱に入れるので、
 # Asset Catalog（CFBundleIconName = AppIcon）にする。icns は作らない（ビルドが Asset Catalog から副生成する）。
-# SMALL_16=1 のときだけ、16×16（1x）の 1 枚を余白の狭い絵にする（標準の余白の 16px が箱に入る絵のための逃げ道。
-# 非 Retina の 16px が箱に入るのは不具合として扱わない方針なので、既定では使わない）
+# 16×16（1x）の 1 枚だけは sips ではなく面積平均で縮める（scripts/area-downscale.swift）。sips で縮めると板の縁が
+# ぼやけ、macOS 27 の形の検出が「角丸 0 の四角」と判定して、非 Retina の 16px の表示を灰色の箱に入れるため。
+# SMALL_16=1 のときは、16×16 を余白の狭い絵にする（面積平均で原因が分かる前の逃げ道。既定では使わない）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +25,8 @@ for size in 16 32 128 256 512; do
     sips -z $size $size "$MASTER" --out "$APPICON/icon_${size}x${size}.png" >/dev/null
     sips -z $((size * 2)) $((size * 2)) "$MASTER" --out "$APPICON/icon_${size}x${size}@2x.png" >/dev/null
 done
+# 16×16（1x）だけ面積平均で作り直す（上の説明）。32px 以上は sips のままで箱に入らない
+swift scripts/area-downscale.swift "$MASTER" 16 "$APPICON/icon_16x16.png"
 if [ "${SMALL_16:-0}" = 1 ]; then
     swift scripts/make-icon.swift "$WORK/master-16.png" small
     sips -z 16 16 "$WORK/master-16.png" --out "$APPICON/icon_16x16.png" >/dev/null

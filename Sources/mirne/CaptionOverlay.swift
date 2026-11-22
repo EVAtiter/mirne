@@ -3,16 +3,6 @@ import Observation
 import os
 import SwiftUI
 
-/// 字幕の重ね描きの決まり。
-enum CaptionOverlayTiming {
-    /// 再生の時計を見て、出す字幕を決め直す間隔。字幕は映像と 0.2 秒以内に合えばよい（完了の判定）ので、
-    /// 毎フレームではなくこの間隔で見る（出す字幕が変わったときだけ SwiftUI が描き直す）
-    static let pollInterval: Duration = .milliseconds(30)
-    /// 再生していない間（時計が止まっている）に見直す間隔。出す字幕は無いので、再生が始まったのに気付ければよい。
-    /// 再生が始まってから最初に字幕を出すまでが、最大でこの分遅れうる（再生の始めに字幕が出ていることはまず無い）
-    static let idlePollInterval: Duration = .milliseconds(250)
-}
-
 /// 字幕の文字の見え方
 enum CaptionAppearance {
     /// 文字の縁（影を重ねて縁取りに見せる）の太さ（字幕の画面の画素）
@@ -33,8 +23,10 @@ enum CaptionAppearance {
 @MainActor
 @Observable
 final class CaptionOverlayModel {
-    /// 字幕を出すか
-    var isEnabled: Bool
+    /// 字幕を出すか。出すようにしたら、すぐ決め直す（見張りの間隔は字幕を出さない間は長いので、次の見直しを待たない）
+    var isEnabled: Bool {
+        didSet { if isEnabled, !oldValue { refresh() } }
+    }
     /// いま出している字幕（`isEnabled` でなくても、決めておく）
     private(set) var cues: [CaptionCue] = []
     /// いまのサービスに字幕の ES があるか（オーバーレイの表示用）
@@ -58,8 +50,8 @@ final class CaptionOverlayModel {
         self.isEnabled = isEnabled
         polling = Task { [weak self] in
             while !Task.isCancelled {
-                let playing = self?.refresh() ?? false
-                try? await Task.sleep(for: playing ? CaptionOverlayTiming.pollInterval : CaptionOverlayTiming.idlePollInterval)
+                let interval = self?.refresh() ?? CaptionOverlayTiming.idlePollInterval
+                try? await Task.sleep(for: interval)
             }
         }
     }
@@ -68,15 +60,15 @@ final class CaptionOverlayModel {
         polling?.cancel()
     }
 
-    /// 出す字幕を決め直す。再生している（時計が動いている）なら true
+    /// 出す字幕を決め直し、次に見直すまでの間隔を返す
     @discardableResult
-    private func refresh() -> Bool {
+    private func refresh() -> Duration {
         let available = engine.hasCaptionStream
         if available != isAvailable { isAvailable = available }
         if let aspect = renderer?.displayAspectRatio, aspect != displayAspectRatio { displayAspectRatio = aspect }
         guard let now = engine.presentationTime() else {
             if !cues.isEmpty { cues = [] }
-            return false
+            return CaptionOverlayTiming.idlePollInterval
         }
         let time = now + (renderer?.presentationDelayTicks ?? 0)
         let visible = engine.captions.visible(at: time)
@@ -91,7 +83,7 @@ final class CaptionOverlayModel {
         }
         let hidden = Set(visible.filter { $0.isHiddenByFlash(at: time) }.map(\.id))
         if hidden != hiddenByFlash { hiddenByFlash = hidden }
-        return true
+        return CaptionOverlayTiming.interval(isPlaying: true, isEnabled: isEnabled, hasCaptionStream: available)
     }
 
     func resetStatistics() {

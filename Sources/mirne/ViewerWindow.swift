@@ -70,6 +70,11 @@ enum ViewerWindowPositioning {
     }
 
     /// プライマリの画面（原点が (0,0) の画面）。`NSScreen.main` はキーウィンドウのある画面なので使わない
+    /// 左上を保ったまま大きさを変えるときの原点（AppKit の座標は下が原点なので、左上から高さを引く）
+    static func origin(keepingTopLeft topLeft: CGPoint, size: CGSize) -> CGPoint {
+        CGPoint(x: topLeft.x, y: topLeft.y - size.height)
+    }
+
     static func primaryScreen() -> NSScreen? {
         NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.screens.first
     }
@@ -228,13 +233,13 @@ final class ViewerWindowController: NSObject {
 
     // MARK: - メニュー
 
-    /// 大きさを初期化する：映像の部分を標準の大きさにし、窓の中心は動かさない（はみ出すなら引き戻す）
+    /// 大きさを初期化する：映像の部分を標準の大きさにし、窓の左上は動かさない（はみ出すなら引き戻す。2026-11-22 に中心から改めた）
     func resetSize() {
         guard let window, !isFullScreen, let chrome else { return }
         let width = ViewerWindowLayout.standardVideoSize.width
         let size = Self.frameSize(videoWidth: width, chrome: chrome)
-        let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
-        let origin = CGPoint(x: center.x - size.width / 2, y: center.y - size.height / 2)
+        let topLeft = CGPoint(x: window.frame.minX, y: window.frame.maxY)
+        let origin = ViewerWindowPositioning.origin(keepingTopLeft: topLeft, size: size)
         let resolved = ViewerWindowPositioning.resolvedOrigin(savedOrigin: origin, targetScreen: window.screen, windowSize: size) ?? origin
         keptVideoWidth = width
         setFrame(NSRect(origin: resolved, size: size), on: window)
@@ -523,7 +528,9 @@ final class ViewerWindowController: NSObject {
         let sidebar = window.frame.width - size.width
         let target = (sidebar + width).rounded()
         guard abs(target - window.frame.width) >= 1 else { return }
-        setFrame(NSRect(x: window.frame.maxX - target, y: window.frame.minY, width: target, height: window.frame.height), on: window)
+        // 開閉の途中は幅を何度も変えるので、AppKit に覚えさせない（覚えさせるのは開閉の後の `fitAfterLayoutChange` の 1 回）
+        setFrame(NSRect(x: window.frame.maxX - target, y: window.frame.minY, width: target, height: window.frame.height), on: window,
+                 asUserSize: false)
     }
 
     private func scheduleSettle() {
@@ -558,9 +565,15 @@ final class ViewerWindowController: NSObject {
                height: (chrome.height + videoWidth / ViewerWindowLayout.videoAspectRatio).rounded())
     }
 
-    private func setFrame(_ frame: NSRect, on window: NSWindow) {
+    /// 位置と大きさを当てる。`asUserSize` なら、その大きさを AppKit に「利用者が決めた大きさ」として覚えさせる
+    /// （`NSWindow.setFrameAsUserSize`。覚えさせないと、別の画面へ移したときに前に手で決めた大きさへ戻る）
+    private func setFrame(_ frame: NSRect, on window: NSWindow, asUserSize: Bool = true) {
         applyingFrame = true
-        window.setFrame(frame, display: true, animate: false)
+        if asUserSize {
+            window.setFrameAsUserSize(frame)
+        } else {
+            window.setFrame(frame, display: true, animate: false)
+        }
         applyingFrame = false
     }
 

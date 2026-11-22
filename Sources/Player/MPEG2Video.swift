@@ -103,6 +103,46 @@ enum MPEG2Parser {
         }
         return (sequence, picture, pictures)
     }
+
+    /// ここから復号を始められるか（シーケンスヘッダがあり、最初のピクチャが I）。`scan` で判定するのと同じ結果になる。
+    ///
+    /// 圧縮のまま溜める映像の PES ごとに呼ぶ（`PlayerEngine`）。`scan` は PES の全部を見るが、答えは最初のピクチャの見出しで
+    /// ほぼ決まるので、そこで読むのをやめる（最初のピクチャが I でなければ偽、I でシーケンスヘッダを見ていれば真）。
+    /// I なのにシーケンスヘッダをまだ見ていないときだけ、後ろにシーケンスヘッダがあるかを最後まで探す。
+    /// 再生中にこの判定に CPU 全体の 0.3% を使っていた（2026-11-21 の実測）
+    static func isRandomAccess(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            let count = bytes.count
+            var sawSequence = false
+            /// 最初のピクチャが I だったか（まだ見ていなければ nil）
+            var firstIsIntra: Bool?
+            var index = 0
+            while index + 4 <= count {
+                guard bytes[index] == 0, bytes[index + 1] == 0, bytes[index + 2] == 1 else {
+                    index += 1
+                    continue
+                }
+                let code = bytes[index + 3]
+                let body = index + 4
+                switch code {
+                case MPEG2StartCode.sequenceHeader:
+                    sawSequence = true
+                    if firstIsIntra == true { return true }
+                case MPEG2StartCode.picture where firstIsIntra == nil:
+                    let codingByte = body + 1 < count ? bytes[body + 1] : 0
+                    let intra = MPEG2PictureInfo.CodingType(rawValue: (codingByte >> 3) & 7) == .intra
+                    guard intra else { return false }
+                    if sawSequence { return true }
+                    firstIsIntra = true
+                default:
+                    break
+                }
+                index = body
+            }
+            return false
+        }
+    }
 }
 
 /// 復号した 1 フレーム。
@@ -116,11 +156,7 @@ public struct DecodedFrame: @unchecked Sendable {
 
 /// MPEG-2 Video を VideoToolbox で復号する。
 ///
-/// - 最初の I ピクチャ（シーケンスヘッダ付き）まで捨てる
-/// - その直後の B ピクチャ（前の GOP を参照する先頭の B）は、最初の P を復号するまで捨てる
-/// - 欠けた PES もそのまま復号に回す。MPEG-2 はスライスごとに立ち直れるので、ブロックノイズは出ても
-///   映像は止まらない（テレビと同じ振る舞い）。次の I まで捨てる方針は、0.1% のパケット欠落で
-///   897 フレーム中 77 しか表示できず、止まって見えたので採らなかった（実測）
+/// - どのピクチャを復号に回すか（最初の I まで捨てる・先頭の B を捨てる・欠けた PES も回す）は `MPEG2PictureGate`
 /// - シーケンス（大きさ・アスペクト比）が変わったら、セッションを作り直す
 public final class MPEG2VideoDecoder: @unchecked Sendable {
     public typealias FrameHandler = @Sendable (DecodedFrame) -> Void
@@ -132,7 +168,7 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var sequence: MPEG2Sequence?
-    private var state = State.waitingForIntra
+    private var gate = MPEG2PictureGate()
     private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "video")
 
     /// 復号に出したフレームのメタデータ。VideoToolbox には番号だけを渡し、コールバックで引き当てる
@@ -142,18 +178,11 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
     private var nextToken = 1
 
     /// 捨てたピクチャの数（理由ごと）
-    public private(set) var skippedBeforeIntra = 0
-    public private(set) var skippedLeadingB = 0
+    public var skippedBeforeIntra: Int { gate.skippedBeforeIntra }
+    public var skippedLeadingB: Int { gate.skippedLeadingB }
     /// 欠けたまま復号に回したピクチャ
-    public private(set) var damagedPictures = 0
+    public var damagedPictures: Int { gate.damagedPictures }
     public private(set) var decodeErrors = 0
-
-    private enum State {
-        case waitingForIntra
-        /// I を復号した。P が来るまで B を捨てる
-        case afterIntra
-        case running
-    }
 
     public init(onFrame: @escaping FrameHandler) {
         self.onFrame = onFrame
@@ -177,24 +206,7 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
             rebuildSession(for: newSequence)
         }
         guard let picture = scanned.picture, let sequence else { return }
-
-        if damaged {
-            damagedPictures += 1
-        }
-        switch (state, picture.codingType) {
-        case (.waitingForIntra, .intra) where scanned.sequence != nil:
-            state = .afterIntra
-        case (.waitingForIntra, _):
-            skippedBeforeIntra += 1
-            return
-        case (.afterIntra, .bidirectional):
-            skippedLeadingB += 1
-            return
-        case (.afterIntra, .predicted):
-            state = .running
-        default:
-            break
-        }
+        guard gate.admit(picture, hasSequenceHeader: scanned.sequence != nil, damaged: damaged) else { return }
         submit(payload, pts: pts, dts: dts, sequence: sequence, picture: picture)
     }
 
@@ -203,7 +215,7 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
         if let session {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
         }
-        state = .waitingForIntra
+        gate.restart()
     }
 
     /// 送ったものの復号が終わるまで待つ
@@ -220,7 +232,7 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
         }
         session = nil
         sequence = newSequence
-        state = .waitingForIntra
+        gate.restart()
 
         var description: CMVideoFormatDescription?
         CMVideoFormatDescriptionCreate(allocator: nil, codecType: kCMVideoCodecType_MPEG2Video,
@@ -268,7 +280,7 @@ public final class MPEG2VideoDecoder: @unchecked Sendable {
                                            customBlockSource: nil, offsetToData: 0, dataLength: length,
                                            flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
         guard let block else { return }
-        payload.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: length) }
+        _ = payload.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: length) }
 
         var timing = CMSampleTimingInfo(duration: .invalid,
                                         presentationTimeStamp: CMTime(value: pts, timescale: 90_000),

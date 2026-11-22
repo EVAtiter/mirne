@@ -4,7 +4,7 @@ import Foundation
 public enum AudioLayout: Sendable, Equatable {
     case mono
     case stereo
-    /// 二重音声（channel_configuration 2 に単一チャンネル要素が 2 つ）
+    /// 二重音声（channel_configuration 2 に単一チャンネル要素が 2 つ。または 0 で PCE が前方に SCE 2 つを指定）
     case dualMono
     /// 5.1ch（channel_configuration 6）
     case surround51
@@ -12,9 +12,13 @@ public enum AudioLayout: Sendable, Equatable {
     case other(channelConfiguration: Int)
 
     init(channelConfiguration: Int, dualMono: Bool) {
+        if dualMono {
+            self = .dualMono
+            return
+        }
         switch channelConfiguration {
         case 1: self = .mono
-        case 2: self = dualMono ? .dualMono : .stereo
+        case 2: self = .stereo
         case 6: self = .surround51
         default: self = .other(channelConfiguration: channelConfiguration)
         }

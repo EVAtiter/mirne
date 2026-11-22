@@ -73,6 +73,50 @@ private enum DualMonoSample {
     static let subFrequency = 3000.0
 }
 
+/// channel_configuration 0 の二重音声（nasne の元画質の録画の形）を、`DualMonoSample` から作る。
+/// ADTS ヘッダの channel_configuration を 0 にし、`programConfigFrames` のフレームの頭に PCE（前方に SCE 2 つ）を差し込む。
+/// PCE の要素はバイトの境目で終わる（byte_alignment の後に comment_field_bytes）ので、続く SCE はそのまま後ろに置ける
+private enum ProgramConfigDualMonoSample {
+    /// id_syn_ele 5（PCE）から始まる、前方に SCE タグ 0・1 を置く PCE（AAC-LC・48 kHz）
+    static let programConfigElement: [UInt8] = {
+        var bits: [Int] = []
+        func put(_ value: Int, _ count: Int) {
+            for shift in stride(from: count - 1, through: 0, by: -1) { bits.append((value >> shift) & 1) }
+        }
+        put(5, 3)                                                   // id_syn_ele = PCE
+        put(0, 4); put(1, 2); put(3, 4)                             // タグ 0・AAC-LC・48 kHz
+        put(2, 4); put(0, 4); put(0, 4); put(0, 2); put(0, 3); put(0, 4)
+        put(0, 1); put(0, 1); put(0, 1)
+        put(0, 1); put(0, 4)                                        // 前方 1: SCE タグ 0
+        put(0, 1); put(1, 4)                                        // 前方 2: SCE タグ 1
+        while bits.count % 8 != 0 { bits.append(0) }
+        put(0, 8)                                                   // comment_field_bytes
+        return stride(from: 0, to: bits.count, by: 8).map { start in UInt8(bits[start..<start + 8].reduce(0) { $0 << 1 | $1 }) }
+    }()
+
+    static func adts(programConfigFrames: Set<Int>) -> Data {
+        let source = [UInt8](DualMonoSample.adts)
+        var output: [UInt8] = []
+        var offset = 0
+        var index = 0
+        while offset + 7 <= source.count {
+            let length = Int(source[offset + 3] & 0x03) << 11 | Int(source[offset + 4]) << 3 | Int(source[offset + 5] >> 5)
+            var header = Array(source[offset..<(offset + 7)])
+            let raw = Array(source[(offset + 7)..<(offset + length)])
+            let inserted = programConfigFrames.contains(index) ? programConfigElement : []
+            let newLength = 7 + inserted.count + raw.count
+            header[2] &= 0xFE                                       // channel_configuration の上 1 ビット
+            header[3] = (header[3] & 0x3C) | UInt8(newLength >> 11 & 0x03)   // 下 2 ビットを 0 にし、長さの上位を入れ直す
+            header[4] = UInt8(newLength >> 3 & 0xFF)
+            header[5] = (header[5] & 0x1F) | UInt8(newLength & 0x07) << 5
+            output += header + inserted + raw
+            offset += length
+            index += 1
+        }
+        return Data(output)
+    }
+}
+
 /// 復号した PCM のチャンネルごとの周波数（零交差から）
 private func frequencies(_ buffers: [CMSampleBuffer]) -> [Double] {
     var channels: [[Float]] = []
@@ -109,6 +153,53 @@ struct DualMonoTests {
             #expect(abs(found[0] - expected.0) < expected.0 * 0.05, "\(choice) の左: \(found[0]) Hz")
             #expect(abs(found[1] - expected.1) < expected.1 * 0.05, "\(choice) の右: \(found[1]) Hz")
         }
+    }
+
+    @Test("channel_configuration 0 で PCE が前方に SCE 2 つを指定する形も二重音声として復号する")
+    func decodesProgramConfigForm() {
+        // PCE が頭のフレームにあるもの・途中から現れるもの（受信の始めに PCE が無い）の両方
+        for frames in [Set([0, 12, 24]), Set([10])] {
+            let adts = ProgramConfigDualMonoSample.adts(programConfigFrames: frames)
+            for (choice, expected) in [(DualMonoChannel.main, (DualMonoSample.mainFrequency, DualMonoSample.mainFrequency)),
+                                       (.sub, (DualMonoSample.subFrequency, DualMonoSample.subFrequency)),
+                                       (.both, (DualMonoSample.mainFrequency, DualMonoSample.subFrequency))] {
+                let decoder = AACDecoder()
+                let buffers = decoder.decode(adts, pts: 0, dualMono: choice)
+                #expect(decoder.isDualMono)
+                #expect(decoder.layout == .dualMono)
+                #expect(decoder.failures == 0, "PCE の位置 \(frames.sorted())")
+                #expect(buffers.count == 25)
+                let found = frequencies(buffers)
+                #expect(found.count == 2)
+                guard found.count == 2 else { continue }
+                #expect(abs(found[0] - expected.0) < expected.0 * 0.05, "\(choice) の左: \(found[0]) Hz")
+                #expect(abs(found[1] - expected.1) < expected.1 * 0.05, "\(choice) の右: \(found[1]) Hz")
+            }
+        }
+    }
+
+    @Test("フレームの頭の PCE を読む（最初の音の要素まで）")
+    func readsLeadingProgramConfig() throws {
+        let frame = ProgramConfigDualMonoSample.programConfigElement + [0b000_0000_0, 0]
+        let leading = try #require(frame.withUnsafeBytes { AACLeadingElements.read($0) })
+        #expect(leading.kinds == [.programConfig, .singleChannel])
+        let config = try #require(leading.programConfig)
+        #expect(config.objectType == 2)
+        #expect(config.sampleRateIndex == 3)
+        #expect(config.front == [.init(isPair: false, tag: 0), .init(isPair: false, tag: 1)])
+        #expect(config.isDualMono)
+        // PCE の無いフレームは最初の要素だけ
+        let plain = try #require([UInt8]([0b001_0000_0, 0]).withUnsafeBytes { AACLeadingElements.read($0) })
+        #expect(plain.kinds == [.channelPair])
+        #expect(plain.programConfig == nil)
+    }
+
+    @Test("二重音声のチャンネル構成は channel_configuration によらず dualMono")
+    func layoutOfDualMono() {
+        #expect(AudioLayout(channelConfiguration: 2, dualMono: true) == .dualMono)
+        #expect(AudioLayout(channelConfiguration: 0, dualMono: true) == .dualMono)
+        #expect(AudioLayout(channelConfiguration: 2, dualMono: false) == .stereo)
+        #expect(AudioLayout(channelConfiguration: 0, dualMono: false) == .other(channelConfiguration: 0))
     }
 
     @Test("生データブロックの最初の要素で見分ける（FIL は飛ばす）")

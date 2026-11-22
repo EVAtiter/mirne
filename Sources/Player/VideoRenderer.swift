@@ -59,7 +59,11 @@ public final class AVSyncRecorder: @unchecked Sendable {
     static let capacity = 20_000
 
     private let lock = NSLock()
+    /// 直近 `capacity` 件のずれ。上限に達したら、古いものの位置（`oldest`）へ上書きする輪の形
+    /// （前は末尾に足して先頭を消していたので、上限に達した後は 1 件ごとに 2 万件を詰め直していた。2026-11-21）。
+    /// 要約は並べ替えて使うので、並びの順は問わない
     private var samples: [Double] = []
+    private var oldest = 0
     private var seen = 0
     /// 画面に出なかった（presentedTime が 0）描画
     private(set) var notPresented = 0
@@ -73,14 +77,19 @@ public final class AVSyncRecorder: @unchecked Sendable {
         }
         seen += 1
         guard seen > Self.warmUpSamples else { return }
-        samples.append(milliseconds)
-        if samples.count > Self.capacity { samples.removeFirst() }
+        if samples.count < Self.capacity {
+            samples.append(milliseconds)
+        } else {
+            samples[oldest] = milliseconds
+            oldest = (oldest + 1) % Self.capacity
+        }
     }
 
     func reset() {
         lock.lock()
         defer { lock.unlock() }
         samples.removeAll()
+        oldest = 0
         seen = 0
         notPresented = 0
     }
@@ -273,7 +282,7 @@ public final class VideoLayerView: NSView {
 /// 止まったままのタイミングを使い続けることがない。
 ///
 /// スレッドの分担：
-/// - 描画のスレッドだけが触るもの: `link`・`pendingCheck`・`currentFrame`・`previousFrame`・`intermediate`・`textureCache`
+/// - 描画のスレッドだけが触るもの: `link`・`pendingCheck`・`currentFrame`・`previousFrame`・`intermediate`・`textureCache`・`texturesFromLastDraw`・`texturesInUse`
 /// - どのスレッドからも触るもの: `shared`（ロックで守る）
 final class VideoRenderCore: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendable {
     /// メインスレッドと描画のスレッドで受け渡す値
@@ -307,6 +316,12 @@ final class VideoRenderCore: NSObject, CAMetalDisplayLinkDelegate, @unchecked Se
     private let thread = RenderThread(name: "mirne.video")
     private let shared = OSAllocatedUnfairLock(initialState: Shared())
     private let logger = Logger(subsystem: "com.slack-kingdom.mirne", category: "video")
+    /// 直前の描画で画素バッファから作ったテクスチャと、今の描画で使っているもの。
+    /// 30 枚/秒の映像を 60 回/秒で描くので、同じフレーム（と動き適応の前後のフレーム）を続けて描く。前は描くたびに
+    /// 2〜4 枚を作り直していて、再生中に CPU 全体の約 1.2% を使っていた（2026-11-21 の実測）。
+    /// 直前の描画で使ったものだけを残すので、持つのは多くても 4 枚（画素バッファもその間だけ放さない）
+    private var texturesFromLastDraw: [PlaneTexture] = []
+    private var texturesInUse: [PlaneTexture] = []
 
     // 描画のスレッドだけが触る
     private var layer: CAMetalLayer?
@@ -492,11 +507,25 @@ final class VideoRenderCore: NSObject, CAMetalDisplayLinkDelegate, @unchecked Se
     // MARK: - 描く（描画のスレッドで）
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        // 描画のスレッドの run loop に置いていても、CAMetalDisplayLink はメインスレッドからも呼ぶことがある
+        // （ディスプレイ間で窓をドラッグしている間。2026-11-22 に Thread Sanitizer で確かめた）。その場で描くと、描画のスレッドの
+        // 描画と同時に走り、描画のスレッドだけが触る値（直前の描画のテクスチャの配列など）が壊れて落ちたので、描画のスレッドへ回す
+        guard thread.isCurrent else {
+            nonisolated(unsafe) let drawable = update.drawable
+            logger.debug("表示のタイミングが描画のスレッドの外から呼ばれたので、描画のスレッドへ回す")
+            thread.perform { [self] in draw(drawable) }
+            return
+        }
         draw(update.drawable)
     }
 
     private func draw(_ drawable: CAMetalDrawable) {
         let drawStarted = ContinuousClock.now
+        // この描画で使わなかったテクスチャは、描き終えたら捨てる
+        defer {
+            texturesFromLastDraw = texturesInUse
+            texturesInUse = []
+        }
         let settings = shared.withLock { state in
             state.statistics.calls += 1
             let snapshot = state.snapshotRequest
@@ -702,14 +731,33 @@ final class VideoRenderCore: NSObject, CAMetalDisplayLinkDelegate, @unchecked Se
         }
     }
 
+    /// 画素バッファの 1 つの平面のテクスチャ（作ったときの参照ごと持つ）
+    private struct PlaneTexture {
+        let buffer: CVPixelBuffer
+        let plane: Int
+        let reference: CVMetalTexture
+        let texture: MTLTexture
+    }
+
+    /// 画素バッファの平面のテクスチャ。今の描画か直前の描画で作っていれば、それを使う
     private func texture(from buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
                          cache: CVMetalTextureCache) -> (CVMetalTexture, MTLTexture)? {
+        let made = texturesInUse.first { $0.buffer === buffer && $0.plane == plane }
+            ?? texturesFromLastDraw.first { $0.buffer === buffer && $0.plane == plane }
+            ?? makeTexture(from: buffer, plane: plane, format: format, cache: cache)
+        guard let made else { return nil }
+        if !texturesInUse.contains(where: { $0.buffer === buffer && $0.plane == plane }) { texturesInUse.append(made) }
+        return (made.reference, made.texture)
+    }
+
+    private func makeTexture(from buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
+                             cache: CVMetalTextureCache) -> PlaneTexture? {
         var reference: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, buffer, nil, format,
                                                   CVPixelBufferGetWidthOfPlane(buffer, plane),
                                                   CVPixelBufferGetHeightOfPlane(buffer, plane), plane, &reference)
         guard let reference, let texture = CVMetalTextureGetTexture(reference) else { return nil }
-        return (reference, texture)
+        return PlaneTexture(buffer: buffer, plane: plane, reference: reference, texture: texture)
     }
 
     /// 表示のアスペクト比を保って画面に収める倍率（1 未満の側に黒帯が入る）
@@ -748,6 +796,9 @@ final class RenderThread: @unchecked Sendable {
         ready.wait()
         runLoop = started!
     }
+
+    /// 今のスレッドが描画のスレッドか
+    var isCurrent: Bool { CFRunLoopGetCurrent() === runLoop }
 
     /// 描画のスレッドで行う（渡した順に）
     func perform(_ work: @escaping @Sendable () -> Void) {
